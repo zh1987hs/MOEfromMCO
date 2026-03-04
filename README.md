@@ -1,44 +1,51 @@
 # MnOx Retrieval (MCO 远同源候选发现)
 
-本项目实现一个**正样本驱动（positive-unlabeled / one-class retrieval）**的端到端管线，用于在多铜氧化酶（MCO）序列集合中检索潜在锰氧化活性远同源候选。默认可离线运行（模拟数据 + fallback embedding），并预留真实 FASTA / ESM / BLAST / HMMER 接口。
+本项目实现一个**正样本驱动（positive-unlabeled / one-class retrieval）**的端到端管线，用于在多铜氧化酶（MCO）序列集合中检索潜在锰氧化活性远同源候选。
 
-## 方法概览
-- 先在正样本 embedding 空间建模正类流形（多 prototype）
-- 先算 BLAST-like / HMM-like baseline 分数
-- 对 easy-hit（易被传统方法命中）施加 penalty
-- 在 hard/missed 区域优先排序 embedding 上接近正样本、且 novelty 高的候选
-- 提供 leave-one-cluster-out 留簇验证
+## 你现在可以“一步到位”做真实检索
+- `external.blast_mode=auto`：检测到 BLAST+（`blastp/makeblastdb`）就走真实 BLAST，缺失时自动回退 BLAST-like
+- `external.hmm_mode=auto`：检测到 HMMER（`phmmer`）就走真实 HMMER，缺失时自动回退 HMM-like
+- `embedding.mode=auto`：检测到可用 ESM 权重就走真实 ESM，否则自动回退离线 embedding
 
-## 模拟数据设计
-- 长度默认 450–700 aa
-- 融入 MCO-like motif + 酸性片段偏好（D/E enrichment）
-- 未标注池包含：normal MCO-like、easy-hit 近同源、远同源 hidden positives（spike-in）
-- hidden positives 在序列 identity 上更低，但在 embedding 上保持可检索弱规律
+> 运行后会输出 `tool_detection.json`，明确本次是否命中了真实后端。
 
 ## 安装（Windows 友好）
-> 推荐**不依赖 activate**，直接调用虚拟环境内 python，避免 PowerShell 执行策略问题。
-
-### 方式 A：不激活环境（推荐）
+推荐不激活虚拟环境，直接用 venv 内 python：
 ```powershell
 py -3.10 -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
+.\.venv\Scripts\python -m pip install -r requirements.txt
 .\.venv\Scripts\python -m pip install -e .
 ```
 
-### 方式 B：激活环境
-- `cmd.exe`:
-```bat
-.venv\Scripts\activate.bat
-pip install -e .
-```
-- PowerShell:
+PowerShell 若报执行策略问题：
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
-pip install -e .
 ```
 
-如果你看到 `Activate.ps1 ... 禁止运行脚本`，这是 PowerShell 默认执行策略导致的，使用上面的 **方式 A** 或先执行 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` 即可。
+## 外部工具安装（BLAST+/HMMER）
+先看当前环境检测：
+```bash
+python -m mnox_retrieval.cli doctor
+```
+
+打印安装建议命令：
+```bash
+python -m mnox_retrieval.cli install-tools --method conda
+python -m mnox_retrieval.cli install-tools --method choco
+```
+
+## 国内离线 ESM 建议
+1. 在可联网机器下载 ESM 模型目录（transformers 格式）
+2. 拷贝到本地，例如 `D:\models\esm2_t33_650M_UR50D`
+3. 配置 `config/default.yaml`：
+```yaml
+embedding:
+  mode: esm
+  esm_model_path: D:/models/esm2_t33_650M_UR50D
+  pooling: mean
+```
 
 ## CLI
 ```bash
@@ -47,32 +54,26 @@ python -m mnox_retrieval.cli simulate-data --out-dir outputs/sim_data
 python -m mnox_retrieval.cli run-demo --sim-dir outputs/sim_data --out-dir outputs/demo
 python -m mnox_retrieval.cli cross-validate --sim-dir outputs/sim_data --out-dir outputs/cv
 python -m mnox_retrieval.cli rank-real --positive-fasta path/to/positives.fasta --unlabeled-fasta path/to/uniref_mco.fasta --out-dir outputs/real
-# 注意: 上面 path/to/... 仅为示例占位路径，需替换为真实存在的 FASTA 文件
-python -m mnox_retrieval.cli export-top --ranking-csv outputs/demo/ranked_candidates.csv --source-fasta outputs/sim_data/unlabeled.fasta --top-n 100 --out-fasta outputs/demo/top_candidates.fasta
+# 注意: path/to/... 是占位路径，需替换为真实存在的 FASTA 文件
+python -m mnox_retrieval.cli export-top --ranking-csv outputs/real/ranked_candidates.csv --source-fasta path/to/uniref_mco.fasta --top-n 200 --out-fasta outputs/real/top200.fasta
 python -m mnox_retrieval.cli plot-report --cv-metrics outputs/cv/cv_metrics_by_fold.csv --out-dir outputs/plots
 ```
 
-## 主要输出
+## 输出文件
 - `ranked_candidates.csv`
 - `top_candidates.fasta`
 - `evaluation_summary.json`
 - `config_used.yaml`
+- `tool_detection.json`
 - `rank_distribution.png`
 - `embedding_pca.png`
-- 留簇验证：`cv_metrics_by_fold.csv`, `cv_summary.csv`, `cv_recall_curve.png`
 
-## 可替换真实组件
-- BLAST-like: 当前为纯 Python 近似；可在同接口替换为 BLAST+ `blastp`
-- HMM-like: 当前为简化 profile；可替换为 HMMER `hmmbuild/hmmsearch`
-- Embedding: 默认 fallback；若配置 ESM 模型路径并安装 `torch/transformers`，可切换真实 ESM
+## 方法概览
+- 正样本 embedding 空间建模（多 prototype）
+- BLAST/HMM baseline 先打分，easy-hit 降权
+- 在 hard/missed 区域优先找 embedding 接近且 novelty 高的候选
+- 留一簇验证（leave-one-cluster-out）
 
 ## 局限性
-- 模拟数据不代表真实进化与结构生物学复杂性
-- baseline 为近似实现，主要用于离线 demo 与流程验证
-- 真正应用到 UniRef 大规模检索时，建议接入真实 BLAST/HMMER + GPU ESM
-
-## 附加脚本
-```bash
-python scripts/demo_analysis.py
-```
-自动执行 demo、CV 并生成 markdown 报告。
+- 模拟数据不等价真实生物进化复杂性
+- 默认 HMMER 真实后端使用 `phmmer`（无需先建 profile）；若你后续要更严格 profile-HMM，可按同接口接 `hmmbuild+hmmsearch`

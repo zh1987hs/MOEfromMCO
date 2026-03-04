@@ -5,8 +5,8 @@ import pandas as pd
 from sklearn.covariance import EmpiricalCovariance
 from sklearn.metrics import pairwise_distances
 
-from .baseline_blast_like import blast_like_search
-from .baseline_hmm_like import hmm_like_search
+from .baseline_blast_like import blast_search_dispatch
+from .baseline_hmm_like import hmm_search_dispatch
 from .scoring import combine_scores, local_support_score, novelty_from_identity, positive_affinity
 
 
@@ -24,10 +24,12 @@ def run_retrieval(
     emb_unl: np.ndarray,
     prototypes: pd.DataFrame,
     weights: dict,
+    baseline_cfg: dict,
+    external_cfg: dict,
     local_neighbors: int = 15,
 ) -> pd.DataFrame:
-    blast = blast_like_search(positives_train, unlabeled)
-    hmm = hmm_like_search(positives_train, unlabeled)
+    blast = blast_search_dispatch(positives_train, unlabeled, baseline_cfg=baseline_cfg, external_cfg=external_cfg)
+    hmm = hmm_search_dispatch(positives_train, unlabeled, baseline_cfg=baseline_cfg, external_cfg=external_cfg)
     proto_mat = np.vstack(prototypes["prototype"].values)
     aff, nearest_idx = positive_affinity(emb_unl, proto_mat)
     dist = pairwise_distances(emb_unl, proto_mat).min(axis=1)

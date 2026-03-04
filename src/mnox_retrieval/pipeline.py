@@ -9,6 +9,7 @@ from .clustering import build_prototypes, cluster_positives_embedding, cluster_p
 from .config import Config
 from .embedding import compute_embeddings
 from .evaluation import evaluate_ranking, summarize_cv
+from .external_tools import detect_tools
 from .io_utils import read_fasta, save_json, save_table, write_fasta
 from .plots import plot_embedding_projection, plot_rank_distribution, plot_recall_curve
 from .qc import quality_control
@@ -48,12 +49,24 @@ def run_once(positives: pd.DataFrame, unlabeled: pd.DataFrame, cfg: Config, out_
     positives["cluster"] = labels
     protos = build_prototypes(positives, emb_pos, labels)
 
-    rank_df = run_retrieval(positives, positives, unlabeled, emb_pos, emb_unl, protos, cfg.get("scoring", default={}), cfg.get("scoring", "local_support_neighbors", default=15))
+    rank_df = run_retrieval(
+        positives,
+        positives,
+        unlabeled,
+        emb_pos,
+        emb_unl,
+        protos,
+        cfg.get("scoring", default={}),
+        cfg.get("baseline", default={}),
+        cfg.get("external", default={}),
+        cfg.get("scoring", "local_support_neighbors", default=15),
+    )
     hidden_ids = set(unlabeled.loc[unlabeled.get("is_hidden_positive", 0) == 1, "id"].tolist()) if "is_hidden_positive" in unlabeled.columns else set()
     metrics = evaluate_ranking(rank_df, hidden_ids, cfg.get("evaluation", "topk", default=[10, 20, 50, 100]))
 
     save_table(rank_df, out_dir / "ranked_candidates.csv")
     save_json(metrics, out_dir / "evaluation_summary.json")
+    save_json(detect_tools(), out_dir / "tool_detection.json")
     cfg.dump(out_dir / "config_used.yaml")
 
     top_records = rank_df.head(100)[["candidate_id"]].merge(unlabeled[["id", "sequence"]], left_on="candidate_id", right_on="id")
@@ -85,7 +98,18 @@ def cross_validate(positives: pd.DataFrame, unlabeled: pd.DataFrame, cfg: Config
         tr_labels = train["cluster"].to_numpy()
         protos = build_prototypes(train, emb_train, tr_labels)
 
-        rank_df = run_retrieval(train, positives, mixed, emb_train, emb_mixed, protos, cfg.get("scoring", default={}), cfg.get("scoring", "local_support_neighbors", default=15))
+        rank_df = run_retrieval(
+            train,
+            positives,
+            mixed,
+            emb_train,
+            emb_mixed,
+            protos,
+            cfg.get("scoring", default={}),
+            cfg.get("baseline", default={}),
+            cfg.get("external", default={}),
+            cfg.get("scoring", "local_support_neighbors", default=15),
+        )
         hidden_ids = set(hold["id"].tolist())
         met = evaluate_ranking(rank_df, hidden_ids, cfg.get("evaluation", "topk", default=[10, 20, 50, 100]))
         met["fold"] = int(fold)

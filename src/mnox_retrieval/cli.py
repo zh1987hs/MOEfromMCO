@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 
 from .config import Config
+from .external_tools import detect_tools
+from .installer import get_install_commands, run_install_commands
 from .io_utils import read_fasta, write_fasta
 from .pipeline import cross_validate, load_or_simulate, load_real_fasta, run_once
 from .simulate import simulate_dataset
@@ -48,7 +50,19 @@ def build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("plot-report", help="Plot recall curve from CV metrics")
     pr.add_argument("--cv-metrics", required=True)
     pr.add_argument("--out-dir", default="outputs/plots")
+
+    doc = sub.add_parser("doctor", help="Show detected external tools and backend mode")
+    doc.add_argument("--json", action="store_true")
+
+    inst = sub.add_parser("install-tools", help="Print/install helper commands for BLAST+/HMMER")
+    inst.add_argument("--method", choices=["conda", "mamba", "choco", "scoop"], default="conda")
+    inst.add_argument("--execute", action="store_true", help="Actually run installer commands")
     return p
+
+
+def _print_install_help(method: str) -> None:
+    print("\n".join(get_install_commands(method)))
+    print("# 离线 ESM: 手动下载模型目录后，在 config/default.yaml 中设置 embedding.esm_model_path")
 
 
 def main() -> None:
@@ -88,6 +102,24 @@ def main() -> None:
         m = pd.read_csv(metrics_path)
         Path(args.out_dir).mkdir(parents=True, exist_ok=True)
         plot_recall_curve(m, Path(args.out_dir) / "recall_curve.png")
+        return
+    if args.cmd == "doctor":
+        tools = detect_tools()
+        if args.json:
+            import json
+
+            print(json.dumps(tools, indent=2))
+        else:
+            for k, v in tools.items():
+                print(f"{k}: {'OK' if v else 'MISSING'}")
+            print("提示: external.blast_mode/hmm_mode=auto 时，工具存在则走真实后端，否则自动回退。")
+        return
+    if args.cmd == "install-tools":
+        _print_install_help(args.method)
+        if args.execute:
+            for cmd, code in run_install_commands(args.method):
+                print(f"[{code}] {cmd}")
+        return
 
 
 if __name__ == "__main__":

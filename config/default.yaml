@@ -10,7 +10,7 @@ simulation:
 embedding:
   mode: auto  # auto|esm|fallback
   esm_model_name: null
-  esm_model_path: null
+  esm_model_path: null  # 推荐国内离线下载后填写本地目录
   dim: 128
   pooling: mean
 clustering:
@@ -26,7 +26,14 @@ scoring:
   local_support_neighbors: 15
 baseline:
   blast_kmer_k: 3
-  hmm_window: 9
+  hmm_window: 3
+external:
+  blast_mode: auto   # auto|real|fallback
+  hmm_mode: auto     # auto|real|fallback
+  blastp_bin: blastp
+  makeblastdb_bin: makeblastdb
+  phmmer_bin: phmmer
+  threads: 4
 evaluation:
   topk: [10, 20, 50, 100]
 runtime:

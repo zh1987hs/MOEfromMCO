@@ -5,6 +5,8 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
+from .external_tools import ExternalToolError, phmmer_search_real, which
+
 
 def build_cluster_profiles(positives: pd.DataFrame, k: int = 3) -> dict[int, Counter[str]]:
     profiles: dict[int, Counter[str]] = {}
@@ -34,7 +36,12 @@ def hmm_like_search(positives: pd.DataFrame, candidates: pd.DataFrame, k: int = 
     return pd.DataFrame(rows)
 
 
-def rank_by_hmm(hmm_df: pd.DataFrame) -> pd.DataFrame:
-    out = hmm_df.sort_values("hmm_like_score", ascending=False).reset_index(drop=True)
-    out["rank"] = np.arange(1, len(out) + 1)
-    return out
+def hmm_search_dispatch(positives: pd.DataFrame, candidates: pd.DataFrame, baseline_cfg: dict, external_cfg: dict) -> pd.DataFrame:
+    mode = external_cfg.get("hmm_mode", "auto")  # auto|real|fallback
+    if mode in {"auto", "real"} and which(external_cfg.get("phmmer_bin", "phmmer")):
+        try:
+            return phmmer_search_real(positives, candidates, phmmer_bin=external_cfg.get("phmmer_bin", "phmmer"))
+        except ExternalToolError:
+            if mode == "real":
+                raise
+    return hmm_like_search(positives, candidates, k=int(baseline_cfg.get("hmm_window", 3)))
