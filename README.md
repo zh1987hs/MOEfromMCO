@@ -47,6 +47,7 @@ python -m mnox_retrieval.cli simulate-data --out-dir outputs/sim_data
 python -m mnox_retrieval.cli run-demo --sim-dir outputs/sim_data --out-dir outputs/demo
 python -m mnox_retrieval.cli cross-validate --sim-dir outputs/sim_data --out-dir outputs/cv
 python -m mnox_retrieval.cli rank-real --positive-fasta path/to/positives.fasta --unlabeled-fasta path/to/uniref_mco.fasta --out-dir outputs/real
+# 注意: 上面 path/to/... 仅为示例占位路径，需替换为真实存在的 FASTA 文件
 python -m mnox_retrieval.cli export-top --ranking-csv outputs/demo/ranked_candidates.csv --source-fasta outputs/sim_data/unlabeled.fasta --top-n 100 --out-fasta outputs/demo/top_candidates.fasta
 python -m mnox_retrieval.cli plot-report --cv-metrics outputs/cv/cv_metrics_by_fold.csv --out-dir outputs/plots
 ```

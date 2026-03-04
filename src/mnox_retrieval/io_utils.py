@@ -6,6 +6,7 @@ from typing import Iterable, Iterator
 
 import pandas as pd
 from Bio import SeqIO
+from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 
@@ -20,12 +21,11 @@ def read_fasta(path: str | Path) -> Iterator[tuple[str, str]]:
 
 
 def write_fasta(records: Iterable[tuple[str, str]], path: str | Path) -> None:
-    seq_records = [SeqRecord(seq=seq, id=rid, description="") for rid, seq in records]
-    # Bio.SeqRecord expects Seq; string accepted by SeqIO.write via SeqRecord.seq assignment handling
-    from Bio.Seq import Seq
-
-    fixed = [SeqRecord(Seq(str(r.seq)), id=r.id, description="") for r in seq_records]
-    SeqIO.write(fixed, str(path), "fasta")
+    """Write FASTA from (id, sequence) iterable."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    seq_records = [SeqRecord(Seq(seq), id=rid, description="") for rid, seq in records]
+    SeqIO.write(seq_records, str(target), "fasta")
 
 
 def save_json(data: dict, path: str | Path) -> None:

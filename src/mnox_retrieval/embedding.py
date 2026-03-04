@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -39,7 +38,13 @@ def compute_embeddings(
     dim: int = 128,
     esm_model_name: str | None = None,
     esm_model_path: str | None = None,
+    pooling: str = "mean",
+    **_: Any,
 ) -> np.ndarray:
+    """Compute sequence embeddings.
+
+    Accepts extra kwargs to stay config-compatible when new fields are added.
+    """
     if mode in {"esm", "auto"}:
         try:
             import torch
@@ -55,7 +60,11 @@ def compute_embeddings(
             for seq in df["sequence"]:
                 with torch.no_grad():
                     t = tok(seq, return_tensors="pt", truncation=True)
-                    out = mdl(**t).last_hidden_state.mean(dim=1).squeeze(0).cpu().numpy()
+                    hidden = mdl(**t).last_hidden_state
+                    if pooling.lower() == "cls":
+                        out = hidden[:, 0, :].squeeze(0).cpu().numpy()
+                    else:
+                        out = hidden.mean(dim=1).squeeze(0).cpu().numpy()
                 embeds.append(out)
             arr = np.vstack(embeds)
             if arr.shape[1] > dim:
@@ -70,5 +79,4 @@ def compute_embeddings(
     hashed = hv.transform(text).toarray()
     concat = np.hstack([feats, hashed])
     d = min(dim, concat.shape[1], len(df))
-    emb = PCA(n_components=max(2, d), random_state=42).fit_transform(concat)
-    return emb
+    return PCA(n_components=max(2, d), random_state=42).fit_transform(concat)
