@@ -3,14 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import pandas as pd
-
-from .config import Config
 from .external_tools import detect_tools
 from .installer import get_install_commands, run_install_commands
-from .io_utils import read_fasta, write_fasta
-from .pipeline import cross_validate, load_or_simulate, load_real_fasta, run_once
-from .simulate import simulate_dataset
 
 
 def _require_exists(path: str | Path, arg_name: str) -> Path:
@@ -67,42 +61,7 @@ def _print_install_help(method: str) -> None:
 
 def main() -> None:
     args = build_parser().parse_args()
-    cfg = Config.from_file(args.config)
 
-    if args.cmd == "simulate-data":
-        sim = cfg.get("simulation", default={})
-        simulate_dataset(args.out_dir, **sim, seed=cfg.get("seed", default=42))
-        return
-    if args.cmd == "run-demo":
-        pos, unl = load_or_simulate(Path(args.sim_dir), cfg)
-        run_once(pos, unl, cfg, Path(args.out_dir))
-        return
-    if args.cmd == "cross-validate":
-        pos, unl = load_or_simulate(Path(args.sim_dir), cfg)
-        cross_validate(pos, unl, cfg, Path(args.out_dir))
-        return
-    if args.cmd == "rank-real":
-        pos_fa = _require_exists(args.positive_fasta, "--positive-fasta")
-        unl_fa = _require_exists(args.unlabeled_fasta, "--unlabeled-fasta")
-        pos, unl = load_real_fasta(str(pos_fa), str(unl_fa))
-        run_once(pos, unl, cfg, Path(args.out_dir))
-        return
-    if args.cmd == "export-top":
-        ranking_csv = _require_exists(args.ranking_csv, "--ranking-csv")
-        source_fasta = _require_exists(args.source_fasta, "--source-fasta")
-        rank = pd.read_csv(ranking_csv).head(args.top_n)
-        ids = set(rank["candidate_id"].tolist())
-        rec = [(rid, seq) for rid, seq in read_fasta(source_fasta) if rid in ids]
-        write_fasta(rec, args.out_fasta)
-        return
-    if args.cmd == "plot-report":
-        from .plots import plot_recall_curve
-
-        metrics_path = _require_exists(args.cv_metrics, "--cv-metrics")
-        m = pd.read_csv(metrics_path)
-        Path(args.out_dir).mkdir(parents=True, exist_ok=True)
-        plot_recall_curve(m, Path(args.out_dir) / "recall_curve.png")
-        return
     if args.cmd == "doctor":
         tools = detect_tools()
         if args.json:
@@ -114,12 +73,70 @@ def main() -> None:
                 print(f"{k}: {'OK' if v else 'MISSING'}")
             print("提示: external.blast_mode/hmm_mode=auto 时，工具存在则走真实后端，否则自动回退。")
         return
+
     if args.cmd == "install-tools":
         _print_install_help(args.method)
         if args.execute:
             for cmd, code in run_install_commands(args.method):
                 print(f"[{code}] {cmd}")
         return
+
+    from .config import Config
+
+    cfg = Config.from_file(args.config)
+
+    if args.cmd == "simulate-data":
+        from .simulate import simulate_dataset
+
+        sim = cfg.get("simulation", default={})
+        simulate_dataset(args.out_dir, **sim, seed=cfg.get("seed", default=42))
+        return
+
+    if args.cmd == "run-demo":
+        from .pipeline import load_or_simulate, run_once
+
+        pos, unl = load_or_simulate(Path(args.sim_dir), cfg)
+        run_once(pos, unl, cfg, Path(args.out_dir))
+        return
+
+    if args.cmd == "cross-validate":
+        from .pipeline import cross_validate, load_or_simulate
+
+        pos, unl = load_or_simulate(Path(args.sim_dir), cfg)
+        cross_validate(pos, unl, cfg, Path(args.out_dir))
+        return
+
+    if args.cmd == "rank-real":
+        from .pipeline import load_real_fasta, run_once
+
+        pos_fa = _require_exists(args.positive_fasta, "--positive-fasta")
+        unl_fa = _require_exists(args.unlabeled_fasta, "--unlabeled-fasta")
+        pos, unl = load_real_fasta(str(pos_fa), str(unl_fa))
+        run_once(pos, unl, cfg, Path(args.out_dir))
+        return
+
+    if args.cmd == "export-top":
+        import pandas as pd
+
+        from .io_utils import read_fasta, write_fasta
+
+        ranking_csv = _require_exists(args.ranking_csv, "--ranking-csv")
+        source_fasta = _require_exists(args.source_fasta, "--source-fasta")
+        rank = pd.read_csv(ranking_csv).head(args.top_n)
+        ids = set(rank["candidate_id"].tolist())
+        rec = [(rid, seq) for rid, seq in read_fasta(source_fasta) if rid in ids]
+        write_fasta(rec, args.out_fasta)
+        return
+
+    if args.cmd == "plot-report":
+        import pandas as pd
+
+        from .plots import plot_recall_curve
+
+        metrics_path = _require_exists(args.cv_metrics, "--cv-metrics")
+        m = pd.read_csv(metrics_path)
+        Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+        plot_recall_curve(m, Path(args.out_dir) / "recall_curve.png")
 
 
 if __name__ == "__main__":

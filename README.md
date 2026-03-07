@@ -138,3 +138,38 @@ py -3.10 -m venv .venv
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/windows_quickstart.ps1 -ProjectRoot D:\MOE
 ```
+
+
+## 常见报错：`No module named mnox_retrieval`
+如果你在 `D:\MOE` 执行：
+```powershell
+python -m mnox_retrieval.cli doctor
+```
+出现该错误，通常是解释器路径或安装方式问题。
+
+### 快速自检（按顺序）
+1. 确认在项目根目录：
+```powershell
+cd D:\MOE
+```
+2. 看当前 Python 是不是你期望的：
+```powershell
+python -c "import sys; print(sys.executable)"
+```
+3. 推荐直接用 venv 的 python（避免路径串环境）：
+```powershell
+.\.venv\Scripts\python -m mnox_retrieval.cli doctor
+```
+
+### 现在这个仓库已支持“源码直跑”
+我已加入桥接包，所以在仓库根目录下可直接执行：
+```powershell
+python -m mnox_retrieval.cli doctor
+```
+即使你还没先 `pip install -e .`，也可以找到 `src/mnox_retrieval`。
+
+### 仍建议的标准做法
+```powershell
+.\.venv\Scripts\python -m pip install -e .
+.\.venv\Scripts\python -m mnox_retrieval.cli doctor
+```

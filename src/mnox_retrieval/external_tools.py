@@ -5,11 +5,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-
-from .io_utils import write_fasta
-
 
 class ExternalToolError(RuntimeError):
     """Raised when an external tool invocation fails."""
@@ -28,19 +23,25 @@ def run_command(cmd: list[str], cwd: str | Path | None = None) -> None:
 
 
 def blastp_search_real(
-    positives: pd.DataFrame,
-    candidates: pd.DataFrame,
+    positives: "pd.DataFrame",
+    candidates: "pd.DataFrame",
     blastp_bin: str = "blastp",
     makeblastdb_bin: str = "makeblastdb",
     threads: int = 1,
-) -> pd.DataFrame:
+) -> "pd.DataFrame":
     """Run real BLASTP and return standardized columns."""
+    import numpy as np
+    import pandas as pd
+
+    from .io_utils import write_fasta
+
     with tempfile.TemporaryDirectory(prefix="mnox_blast_") as td:
         tdir = Path(td)
         pos_fa = tdir / "positives.fasta"
         cand_fa = tdir / "candidates.fasta"
         db_prefix = tdir / "pos_db"
         out_tsv = tdir / "blast.tsv"
+
         write_fasta([(r.id, r.sequence) for r in positives.itertuples()], pos_fa)
         write_fasta([(r.id, r.sequence) for r in candidates.itertuples()], cand_fa)
         run_command([makeblastdb_bin, "-in", str(pos_fa), "-dbtype", "prot", "-out", str(db_prefix)])
@@ -88,7 +89,9 @@ def blastp_search_real(
     return _fill_missing_blast(result, candidates)
 
 
-def _fill_missing_blast(df: pd.DataFrame, candidates: pd.DataFrame) -> pd.DataFrame:
+def _fill_missing_blast(df: "pd.DataFrame", candidates: "pd.DataFrame") -> "pd.DataFrame":
+    import pandas as pd
+
     base = pd.DataFrame({"candidate_id": candidates["id"].tolist()})
     merged = base.merge(df, on="candidate_id", how="left")
     merged["best_hit_positive_id"] = merged["best_hit_positive_id"].fillna("NA")
@@ -99,11 +102,16 @@ def _fill_missing_blast(df: pd.DataFrame, candidates: pd.DataFrame) -> pd.DataFr
 
 
 def phmmer_search_real(
-    positives: pd.DataFrame,
-    candidates: pd.DataFrame,
+    positives: "pd.DataFrame",
+    candidates: "pd.DataFrame",
     phmmer_bin: str = "phmmer",
-) -> pd.DataFrame:
+) -> "pd.DataFrame":
     """Run HMMER(phmmer) as real backend and map to hmm_like_score."""
+    import numpy as np
+    import pandas as pd
+
+    from .io_utils import write_fasta
+
     with tempfile.TemporaryDirectory(prefix="mnox_hmmer_") as td:
         tdir = Path(td)
         pos_fa = tdir / "positives.fasta"
@@ -130,10 +138,7 @@ def phmmer_search_real(
                 if target not in score_map or score > score_map[target]:
                     score_map[target] = score
 
-        if score_map:
-            smax = max(score_map.values())
-        else:
-            smax = 1.0
+        smax = max(score_map.values()) if score_map else 1.0
         rows = [
             {
                 "candidate_id": cid,
