@@ -1,0 +1,41 @@
+seed: 42
+simulation:
+  n_positives: 200
+  n_clusters: 5
+  unlabeled_size: 6000
+  easy_hits: 700
+  hidden_positives: 80
+  length_min: 450
+  length_max: 700
+embedding:
+  mode: auto  # auto|esm|fallback
+  esm_model_name: null
+  esm_model_path: null  # 推荐国内离线下载后填写本地目录
+  dim: 128
+  pooling: mean
+clustering:
+  mode: embedding  # embedding|sequence
+  n_clusters: 5
+scoring:
+  weights:
+    positive_affinity: 0.45
+    novelty: 0.25
+    local_support: 0.20
+    easy_hit_penalty: 0.10
+  easy_hit_threshold: 0.72
+  local_support_neighbors: 15
+baseline:
+  blast_kmer_k: 3
+  hmm_window: 3
+external:
+  blast_mode: auto   # auto|real|fallback
+  hmm_mode: auto     # auto|real|fallback
+  blastp_bin: blastp
+  makeblastdb_bin: makeblastdb
+  phmmer_bin: phmmer
+  threads: 4
+evaluation:
+  topk: [10, 20, 50, 100]
+runtime:
+  cache_dir: outputs/cache
+  batch_size: 16
