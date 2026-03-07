@@ -80,7 +80,24 @@ def detect_linux_distro() -> str:
         return "almalinux"
     if "ubuntu" in content:
         return "ubuntu"
+    if "debian" in content:
+        return "debian"
     return "linux"
+
+
+
+
+def is_wsl() -> bool:
+    """Detect whether current Linux runtime is WSL."""
+    if platform.system().lower() != "linux":
+        return False
+    proc_version = Path("/proc/version")
+    if proc_version.exists() and "microsoft" in proc_version.read_text(encoding="utf-8", errors="ignore").lower():
+        return True
+    os_release = Path("/etc/os-release")
+    if os_release.exists() and "microsoft" in os_release.read_text(encoding="utf-8", errors="ignore").lower():
+        return True
+    return False
 
 
 def check_python_dependencies() -> None:
@@ -132,6 +149,13 @@ def _external_tool_hints() -> str:
     sys_name = platform.system().lower()
     if sys_name == "linux":
         distro = detect_linux_distro()
+        if is_wsl() and distro in {"ubuntu", "debian", "linux"}:
+            return (
+                "WSL Ubuntu/Debian examples:\n"
+                "- sudo apt-get update && sudo apt-get install -y hmmer mafft muscle build-essential\n"
+                "- MMseqs2 推荐用 conda: conda install -c conda-forge -c bioconda mmseqs2 hmmer mafft muscle\n"
+                "- 性能建议: 数据放在 WSL Linux 文件系统（如 ~/projects），避免 /mnt/c 上的大规模 I/O"
+            )
         if distro in {"centos", "rhel", "rocky", "almalinux"}:
             return (
                 "CentOS/RHEL-like examples:\n"
@@ -139,6 +163,12 @@ def _external_tool_hints() -> str:
                 "- sudo dnf install -y hmmer mafft muscle\n"
                 "- MMseqs2 推荐用 conda: conda install -c bioconda mmseqs2 hmmer mafft muscle\n"
                 "- 若是 CentOS 7 用 yum: sudo yum install -y epel-release hmmer mafft muscle"
+            )
+        if distro in {"ubuntu", "debian"}:
+            return (
+                "Ubuntu/Debian examples:\n"
+                "- sudo apt-get update && sudo apt-get install -y hmmer mafft muscle build-essential\n"
+                "- conda: conda install -c conda-forge -c bioconda mmseqs2 hmmer mafft muscle"
             )
         return (
             "Linux examples:\n"

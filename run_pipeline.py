@@ -26,6 +26,7 @@ from mnox.utils import (
     setup_logger,
     write_dataframe,
     write_lines,
+    is_wsl,
 )
 
 
@@ -36,6 +37,9 @@ def main() -> None:
 
     logger.info("Run directory: %s", run_dir)
     logger.info("Runtime platform: %s", platform.platform())
+    if is_wsl():
+        logger.info("WSL detected: using Linux toolchain path.")
+        logger.info("For large data, keep FASTA/outputs inside WSL filesystem (e.g. ~/projects), not /mnt/c.")
 
     # Step 0
     check_python_dependencies()

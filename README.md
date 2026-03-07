@@ -9,7 +9,8 @@
 ├── config.yaml
 ├── run_pipeline.py
 ├── scripts/
-│   └── setup_centos.sh
+│   ├── setup_centos.sh
+│   └── setup_wsl_ubuntu.sh
 ├── mnox/
 │   ├── __init__.py
 │   ├── cluster.py
@@ -25,7 +26,38 @@
 └── README.md
 ```
 
-## CentOS 使用说明（推荐）
+## Windows + WSL Ubuntu 使用说明（推荐）
+
+这是当前最推荐的方式：Windows 便于操作，WSL Ubuntu 保证生信工具链稳定。
+
+### 方案 A：一键脚本（推荐）
+
+```bash
+bash scripts/setup_wsl_ubuntu.sh
+conda activate mnox
+python run_pipeline.py
+```
+
+### 方案 B：手动安装（WSL Ubuntu）
+
+```bash
+sudo apt-get update
+sudo apt-get install -y hmmer mafft muscle build-essential pkg-config git wget curl
+
+conda create -n mnox python=3.10 -y
+conda activate mnox
+conda install -c conda-forge -c bioconda -y \
+  mmseqs2 hmmer mafft muscle \
+  numpy pandas scipy scikit-learn matplotlib pyarrow biopython pyyaml transformers
+conda install -c pytorch -y pytorch cpuonly
+```
+
+### WSL 性能建议（重要）
+
+- 大文件 FASTA、embedding 缓存、`runs/` 输出请放在 **WSL Linux 文件系统**（如 `~/projects/MOEfromMCO`）。
+- 尽量避免在 `/mnt/c/...` 目录直接跑 16 万序列任务（I/O 会明显变慢）。
+
+## CentOS 使用说明
 
 ### 方案 A：一键脚本（推荐）
 
@@ -66,13 +98,14 @@ conda install -c conda-forge -c bioconda -y \
 conda install -c pytorch -y pytorch cpuonly
 ```
 
+## 运行
 
-3. 准备数据并修改 `config.yaml`
+准备数据并修改 `config.yaml`：
 
 - `positives.fasta`
 - `unlabeled_mco.fasta`
 
-4. 运行
+执行：
 
 ```bash
 python run_pipeline.py
@@ -80,11 +113,44 @@ python run_pipeline.py
 
 输出在 `runs/YYYYMMDD_HHMMSS/`。
 
-## 运行与性能建议（CentOS）
+## 运行与性能建议
 
 - `mmseqs_tmp` 建议放在本地 SSD（可在 `config.yaml` 的 `mmseqs.tmp_dir` 调整）。
 - 大规模 embedding 建议优先 GPU；CPU 跑时可适当减小 `esm.batch_size`。
 - 对 16 万序列建议保留 `esm.shard_size=5000~20000`，并确保磁盘空间充足。
+
+## 常见报错与修复（CentOS/WSL）
+
+### 1) `pip install pandas` 触发源码编译失败（`stdatomic.h` / gcc 4.8.5）
+
+症状：`fatal error: stdatomic.h: No such file or directory`、`__has_builtin not detected`。  
+原因：系统编译器太老，pip 没拿到 wheel 后转源码编译 pandas 失败。
+
+**推荐修复（不要用 pip 编 pandas）**：
+
+```bash
+conda activate mnox
+conda install -c conda-forge -y numpy pandas scipy scikit-learn matplotlib pyarrow biopython pyyaml transformers
+conda install -c pytorch -y pytorch cpuonly
+```
+
+### 2) MMseqs2/HMMER 命令找不到
+
+先激活环境后确认：
+
+```bash
+conda activate mnox
+which mmseqs
+which hmmbuild
+which hmmsearch
+which mafft
+```
+
+若找不到，重新执行：
+
+```bash
+conda install -c conda-forge -c bioconda -y mmseqs2 hmmer mafft muscle
+```
 
 ## 结果说明
 
@@ -117,23 +183,3 @@ python run_pipeline.py
 - embedding 可能捕捉谱系/长度等非功能信号。
 - MSA/HMM 质量受簇内多样性与比对质量影响。
 - 超大规模计算对 GPU/CPU/存储要求较高。
-
-
-## 常见报错与修复（CentOS）
-
-### 1) `pip install pandas` 触发源码编译失败（`stdatomic.h` / gcc 4.8.5）
-
-症状：你日志中的 `fatal error: stdatomic.h: No such file or directory`、`__has_builtin not detected`。  
-原因：CentOS 7 默认编译器太老，pip 没拿到 wheel 后转源码编译 pandas 失败。
-
-**推荐修复（不要用 pip 编 pandas）**：
-
-```bash
-conda activate mnox
-conda install -c conda-forge -y numpy pandas scipy scikit-learn matplotlib pyarrow biopython pyyaml transformers
-conda install -c pytorch -y pytorch cpuonly
-```
-
-### 2) 如果你必须用 pip（不推荐）
-
-先升级编译工具链（如 devtoolset/gcc>=9）和 Python 头文件，再安装；但这条路径复杂、易踩坑。对本项目建议始终优先 conda 二进制包。
