@@ -51,14 +51,21 @@ sudo yum install -y epel-release
 sudo yum install -y hmmer mafft muscle git wget
 ```
 
-2. Conda 环境与 Python 包
+2. Conda 环境与 Python 包（**强烈建议重包都用 conda**）
 
 ```bash
 conda create -n mnox python=3.10 -y
 conda activate mnox
-conda install -c conda-forge -c bioconda -y mmseqs2 hmmer mafft muscle
-pip install biopython numpy pandas scikit-learn scipy pyyaml matplotlib torch transformers pyarrow
+
+# 生信工具 + 科学计算栈（避免 pip 在老系统上源码编译失败）
+conda install -c conda-forge -c bioconda -y \
+  mmseqs2 hmmer mafft muscle \
+  numpy pandas scipy scikit-learn matplotlib pyarrow biopython pyyaml transformers
+
+# PyTorch（CPU 版）
+conda install -c pytorch -y pytorch cpuonly
 ```
+
 
 3. 准备数据并修改 `config.yaml`
 
@@ -110,3 +117,23 @@ python run_pipeline.py
 - embedding 可能捕捉谱系/长度等非功能信号。
 - MSA/HMM 质量受簇内多样性与比对质量影响。
 - 超大规模计算对 GPU/CPU/存储要求较高。
+
+
+## 常见报错与修复（CentOS）
+
+### 1) `pip install pandas` 触发源码编译失败（`stdatomic.h` / gcc 4.8.5）
+
+症状：你日志中的 `fatal error: stdatomic.h: No such file or directory`、`__has_builtin not detected`。  
+原因：CentOS 7 默认编译器太老，pip 没拿到 wheel 后转源码编译 pandas 失败。
+
+**推荐修复（不要用 pip 编 pandas）**：
+
+```bash
+conda activate mnox
+conda install -c conda-forge -y numpy pandas scipy scikit-learn matplotlib pyarrow biopython pyyaml transformers
+conda install -c pytorch -y pytorch cpuonly
+```
+
+### 2) 如果你必须用 pip（不推荐）
+
+先升级编译工具链（如 devtoolset/gcc>=9）和 Python 头文件，再安装；但这条路径复杂、易踩坑。对本项目建议始终优先 conda 二进制包。

@@ -26,8 +26,16 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate mnox
 
 # Prefer bioconda for mmseqs2 and bio tools consistency.
-conda install -c conda-forge -c bioconda -y mmseqs2 hmmer mafft muscle
-pip install biopython numpy pandas scikit-learn scipy pyyaml matplotlib torch transformers pyarrow
+# IMPORTANT: install heavy scientific stack from conda to avoid local compilation issues
+# on old CentOS toolchains (e.g., gcc 4.8 on CentOS 7).
+conda install -c conda-forge -c bioconda -y \
+  mmseqs2 hmmer mafft muscle \
+  numpy pandas scipy scikit-learn matplotlib pyarrow biopython pyyaml transformers
+
+# PyTorch: prefer conda binary packages.
+# CPU-only:
+conda install -c pytorch -y pytorch cpuonly
+# If you need CUDA, replace with the command from https://pytorch.org/get-started/locally/
 
 echo "[OK] Environment ready. Activate with: conda activate mnox"
 echo "[OK] Then run: python run_pipeline.py"

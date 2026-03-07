@@ -112,8 +112,8 @@ def check_python_dependencies() -> None:
             "Missing Python packages: "
             f"{', '.join(missing)}\n"
             "Install suggestions:\n"
-            "- conda: conda install biopython numpy pandas scikit-learn scipy pyyaml matplotlib pytorch -c pytorch\n"
-            "- pip: pip install biopython numpy pandas scikit-learn scipy pyyaml matplotlib torch transformers\n"
+            "- Recommended (CentOS): conda install -c conda-forge -c bioconda biopython numpy pandas scikit-learn scipy pyyaml matplotlib transformers pyarrow && conda install -c pytorch pytorch cpuonly\n"
+            "- pip (may compile and fail on old CentOS toolchains): pip install biopython numpy pandas scikit-learn scipy pyyaml matplotlib torch transformers\n"
             "- fair-esm optional: pip install fair-esm"
         )
         raise RuntimeError(hint)
