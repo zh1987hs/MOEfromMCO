@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import platform
 import shutil
 import subprocess
 import sys
@@ -63,6 +64,25 @@ def ensure_dir(path: str | Path) -> Path:
     return p
 
 
+def detect_linux_distro() -> str:
+    """Best-effort Linux distro detection using /etc/os-release."""
+    os_release = Path("/etc/os-release")
+    if not os_release.exists():
+        return "unknown"
+    content = os_release.read_text(encoding="utf-8", errors="ignore").lower()
+    if "centos" in content:
+        return "centos"
+    if "rhel" in content or "red hat" in content:
+        return "rhel"
+    if "rocky" in content:
+        return "rocky"
+    if "almalinux" in content:
+        return "almalinux"
+    if "ubuntu" in content:
+        return "ubuntu"
+    return "linux"
+
+
 def check_python_dependencies() -> None:
     """Check required Python packages and raise with install hints if missing."""
     required = [
@@ -107,6 +127,34 @@ def _can_import(module: str) -> bool:
         return False
 
 
+def _external_tool_hints() -> str:
+    """Build OS-specific tool installation hints."""
+    sys_name = platform.system().lower()
+    if sys_name == "linux":
+        distro = detect_linux_distro()
+        if distro in {"centos", "rhel", "rocky", "almalinux"}:
+            return (
+                "CentOS/RHEL-like examples:\n"
+                "- sudo dnf install -y epel-release\n"
+                "- sudo dnf install -y hmmer mafft muscle\n"
+                "- MMseqs2 推荐用 conda: conda install -c bioconda mmseqs2 hmmer mafft muscle\n"
+                "- 若是 CentOS 7 用 yum: sudo yum install -y epel-release hmmer mafft muscle"
+            )
+        return (
+            "Linux examples:\n"
+            "- conda: conda install -c bioconda mmseqs2 hmmer mafft muscle\n"
+            "- apt (partial): sudo apt-get install hmmer mafft muscle"
+        )
+    if sys_name == "darwin":
+        return "macOS examples:\n- brew install mmseqs2 hmmer mafft muscle"
+    return (
+        "Windows (PowerShell) examples:\n"
+        "- conda: conda install -c bioconda mmseqs2 hmmer mafft muscle\n"
+        "- chocolatey: choco install hmmer mafft muscle\n"
+        "- Prefer WSL2 for MMseqs2/HMMER compatibility"
+    )
+
+
 def check_external_tools(msa_tool: str) -> dict[str, ToolCheckResult]:
     """Check required external executables and raise detailed errors if missing."""
     tool_names = ["mmseqs", "hmmbuild", "hmmsearch", msa_tool]
@@ -123,15 +171,7 @@ def check_external_tools(msa_tool: str) -> dict[str, ToolCheckResult]:
     if missing:
         msg = (
             f"Missing external tools: {', '.join(missing)}\n"
-            "Linux examples:\n"
-            "- conda: conda install -c bioconda mmseqs2 hmmer mafft muscle\n"
-            "- apt (partial): sudo apt-get install hmmer mafft muscle\n"
-            "macOS examples:\n"
-            "- brew: brew install mmseqs2 hmmer mafft muscle\n"
-            "Windows (PowerShell) examples:\n"
-            "- conda: conda install -c bioconda mmseqs2 hmmer mafft muscle\n"
-            "- chocolatey: choco install hmmer mafft muscle\n"
-            "- Prefer running MMseqs2/HMMER in WSL2 for best compatibility, or add native binaries to PATH."
+            f"{_external_tool_hints()}"
         )
         raise RuntimeError(msg)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 import time
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def main() -> None:
     logger = setup_logger(run_dir)
 
     logger.info("Run directory: %s", run_dir)
+    logger.info("Runtime platform: %s", platform.platform())
 
     # Step 0
     check_python_dependencies()

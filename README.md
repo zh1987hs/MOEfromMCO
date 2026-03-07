@@ -8,6 +8,8 @@
 .
 ├── config.yaml
 ├── run_pipeline.py
+├── scripts/
+│   └── setup_centos.sh
 ├── mnox/
 │   ├── __init__.py
 │   ├── cluster.py
@@ -23,27 +25,42 @@
 └── README.md
 ```
 
-## 本地最简运行步骤
+## CentOS 使用说明（推荐）
 
-1. 创建环境并安装 Python 依赖
+### 方案 A：一键脚本（推荐）
+
+```bash
+bash scripts/setup_centos.sh
+conda activate mnox
+python run_pipeline.py
+```
+
+> 说明：脚本会尝试用 `dnf/yum` 安装 `hmmer/mafft/muscle`，并用 conda 安装 `mmseqs2` 与 Python 依赖。
+
+### 方案 B：手动安装
+
+1. 系统依赖（CentOS/RHEL/Rocky/AlmaLinux）
+
+```bash
+# dnf 系列（CentOS Stream/Rocky/Alma）
+sudo dnf install -y epel-release
+sudo dnf install -y hmmer mafft muscle git wget
+
+# CentOS 7 可用 yum
+sudo yum install -y epel-release
+sudo yum install -y hmmer mafft muscle git wget
+```
+
+2. Conda 环境与 Python 包
 
 ```bash
 conda create -n mnox python=3.10 -y
 conda activate mnox
+conda install -c conda-forge -c bioconda -y mmseqs2 hmmer mafft muscle
 pip install biopython numpy pandas scikit-learn scipy pyyaml matplotlib torch transformers pyarrow
 ```
 
-2. 安装外部工具（MMseqs2 / HMMER / MAFFT 或 MUSCLE）
-
-```bash
-# 推荐
-conda install -c bioconda mmseqs2 hmmer mafft muscle -y
-
-# macOS 可选
-brew install mmseqs2 hmmer mafft muscle
-```
-
-3. 准备数据文件并修改 `config.yaml`
+3. 准备数据并修改 `config.yaml`
 
 - `positives.fasta`
 - `unlabeled_mco.fasta`
@@ -56,20 +73,11 @@ python run_pipeline.py
 
 输出在 `runs/YYYYMMDD_HHMMSS/`。
 
-### Windows（PowerShell）建议
+## 运行与性能建议（CentOS）
 
-```powershell
-# 1) 建议先安装 Miniconda，再创建环境
-conda create -n mnox python=3.10 -y
-conda activate mnox
-pip install biopython numpy pandas scikit-learn scipy pyyaml matplotlib torch transformers pyarrow
-
-# 2) 外部工具优先用 bioconda（推荐）
-conda install -c bioconda mmseqs2 hmmer mafft muscle -y
-
-# 3) 如果 mmseqs2 在原生 Windows 不稳定，建议用 WSL2 运行同一项目目录
-```
-
+- `mmseqs_tmp` 建议放在本地 SSD（可在 `config.yaml` 的 `mmseqs.tmp_dir` 调整）。
+- 大规模 embedding 建议优先 GPU；CPU 跑时可适当减小 `esm.batch_size`。
+- 对 16 万序列建议保留 `esm.shard_size=5000~20000`，并确保磁盘空间充足。
 
 ## 结果说明
 
