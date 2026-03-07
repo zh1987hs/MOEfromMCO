@@ -77,3 +77,64 @@ python -m mnox_retrieval.cli plot-report --cv-metrics outputs/cv/cv_metrics_by_f
 ## 局限性
 - 模拟数据不等价真实生物进化复杂性
 - 默认 HMMER 真实后端使用 `phmmer`（无需先建 profile）；若你后续要更严格 profile-HMM，可按同接口接 `hmmbuild+hmmsearch`
+
+
+## D:\MOE 本地一步一步出结果（未安装 BLAST/HMMER 也可先跑）
+下面按你当前状态（外部工具未安装）给出最稳流程：
+
+### Step 0: 打开终端并进入项目目录
+```powershell
+cd D:\MOE
+```
+
+### Step 1: 创建并使用虚拟环境（推荐不激活）
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\python -m pip install --upgrade pip
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m pip install -e .
+```
+
+### Step 2: 看当前是否检测到外部工具
+```powershell
+.\.venv\Scripts\python -m mnox_retrieval.cli doctor
+```
+- 若显示 `MISSING`，不用担心：当前会自动走 fallback，依然能出结果。
+
+### Step 3: 先跑模拟数据，确认全链路
+```powershell
+.\.venv\Scripts\python -m mnox_retrieval.cli simulate-data --out-dir outputs/sim_data
+.\.venv\Scripts\python -m mnox_retrieval.cli run-demo --sim-dir outputs/sim_data --out-dir outputs/demo
+```
+
+### Step 4: 查看结果文件
+- `outputs/demo/ranked_candidates.csv`（主排序结果）
+- `outputs/demo/top_candidates.fasta`（Top 候选）
+- `outputs/demo/evaluation_summary.json`（指标）
+- `outputs/demo/tool_detection.json`（本次是否命中真实工具）
+
+### Step 5: 跑真实 FASTA（你自己的正样本+未标记集合）
+```powershell
+.\.venv\Scripts\python -m mnox_retrieval.cli rank-real --positive-fasta D:/MOE/data/positives.fasta --unlabeled-fasta D:/MOE/data/uniref_mco.fasta --out-dir outputs/real
+```
+完成后看：
+- `outputs/real/ranked_candidates.csv`
+- `outputs/real/top_candidates.fasta`
+- `outputs/real/tool_detection.json`
+
+### Step 6（可选）: 再升级到真实 BLAST/HMMER
+先查看建议命令：
+```powershell
+.\.venv\Scripts\python -m mnox_retrieval.cli install-tools --method conda
+```
+安装后再执行：
+```powershell
+.\.venv\Scripts\python -m mnox_retrieval.cli doctor
+```
+如果显示 `blastp/makeblastdb/phmmer: OK`，后续 `rank-real` 会自动优先走真实后端（配置是 `auto`）。
+
+### 一键脚本（可选）
+项目里已提供：
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/windows_quickstart.ps1 -ProjectRoot D:\MOE
+```
