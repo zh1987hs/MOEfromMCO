@@ -1,0 +1,60 @@
+input:
+  positives_fasta: "positives.fasta"
+  unlabeled_fasta: "unlabeled_mco.fasta"
+
+output:
+  base_dir: "runs"
+
+random_seed: 42
+
+qc:
+  min_len: 250
+  max_len: 2000
+  check_motif: false
+
+esm:
+  model_name: "facebook/esm2_t33_650M_UR50D"
+  batch_size: 8
+  pooling: "mean"  # mean or cls
+  device: null      # null => auto (cuda if available)
+  shard_size: 5000
+
+clustering:
+  methods: ["agglomerative", "kmeans"]
+  k_min: 3
+  k_max: 10
+
+mmseqs:
+  threads: 16
+  sensitivity: 7.5
+  max_seqs: 50
+  evalue: 1.0e-3
+  top_n: 5
+  tmp_dir: "mmseqs_tmp"
+
+hmmer:
+  msa_tool: "mafft"   # mafft or muscle
+  threads: 16
+  evalue: 1.0e-3
+
+easy_hit:
+  mmseqs:
+    fident_min: 0.30
+    qcov_min: 0.70
+    evalue_max: 1.0e-5
+  hmm:
+    evalue_max: 1.0e-5
+    bitscore_min: 50.0
+
+retrieval:
+  distance_metric: "cosine"  # cosine or euclidean
+  novelty_cap: 0.95
+  knn_k: 20
+  w_affinity: 0.60
+  w_novelty: 0.25
+  w_local_support: 0.15
+  top_n_export: 200
+
+cv:
+  background_n: 5000
+  k_values: [10, 20, 50, 100]
