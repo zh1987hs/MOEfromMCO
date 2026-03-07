@@ -161,6 +161,8 @@ def main() -> None:
     )
     ranked = ranked.merge(mm_flags, on="candidate_id", how="left")
     ranked = ranked.merge(hmm_flags, on="candidate_id", how="left")
+    ranked["mmseqs_easy_hit_flag"] = ranked["mmseqs_easy_hit_flag"].fillna(False).astype(bool)
+    ranked["hmm_easy_hit_flag"] = ranked["hmm_easy_hit_flag"].fillna(False).astype(bool)
     rank_path = write_dataframe(ranked, run_dir / "ranked_candidates", logger)
     logger.info("Ranked candidates -> %s", rank_path)
 

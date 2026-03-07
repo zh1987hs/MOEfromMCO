@@ -56,6 +56,21 @@ python run_pipeline.py
 
 输出在 `runs/YYYYMMDD_HHMMSS/`。
 
+### Windows（PowerShell）建议
+
+```powershell
+# 1) 建议先安装 Miniconda，再创建环境
+conda create -n mnox python=3.10 -y
+conda activate mnox
+pip install biopython numpy pandas scikit-learn scipy pyyaml matplotlib torch transformers pyarrow
+
+# 2) 外部工具优先用 bioconda（推荐）
+conda install -c bioconda mmseqs2 hmmer mafft muscle -y
+
+# 3) 如果 mmseqs2 在原生 Windows 不稳定，建议用 WSL2 运行同一项目目录
+```
+
+
 ## 结果说明
 
 主要输出包括：

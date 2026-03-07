@@ -19,13 +19,20 @@ def build_easy_and_missed_sets(
     flags = pd.DataFrame({"candidate_id": candidate_ids})
     flags = flags.merge(mm_flags, on="candidate_id", how="left")
     flags = flags.merge(hmm_flags, on="candidate_id", how="left")
-    flags["mmseqs_easy_hit_flag"] = flags["mmseqs_easy_hit_flag"].fillna(False)
-    flags["hmm_easy_hit_flag"] = flags["hmm_easy_hit_flag"].fillna(False)
+    flags["mmseqs_easy_hit_flag"] = flags["mmseqs_easy_hit_flag"].fillna(False).astype(bool)
+    flags["hmm_easy_hit_flag"] = flags["hmm_easy_hit_flag"].fillna(False).astype(bool)
     flags["easy"] = flags["mmseqs_easy_hit_flag"] | flags["hmm_easy_hit_flag"]
 
     easy_ids = flags.loc[flags["easy"], "candidate_id"].tolist()
     missed_ids = flags.loc[~flags["easy"], "candidate_id"].tolist()
     return easy_ids, missed_ids
+
+
+def _novelty_from_hmm_evalue(evalue: float) -> float:
+    """Convert HMM evalue to novelty: weaker hit => higher novelty."""
+    ev = max(float(evalue), 1e-300)
+    strength = min(1.0, max(0.0, (-np.log10(ev)) / 200.0))  # very small evalue => strong/known
+    return 1.0 - strength
 
 
 def rank_missed_candidates(
@@ -40,8 +47,12 @@ def rank_missed_candidates(
     score_cfg: dict,
 ) -> pd.DataFrame:
     """Score and rank missed candidates via affinity/novelty/local support."""
+    if len(missed_ids) == 0:
+        return pd.DataFrame()
+
     id_to_idx = {sid: i for i, sid in enumerate(unlabeled_ids)}
-    miss_idx = [id_to_idx[mid] for mid in missed_ids if mid in id_to_idx]
+    valid_ids = [mid for mid in missed_ids if mid in id_to_idx]
+    miss_idx = [id_to_idx[mid] for mid in valid_ids]
     miss_emb = unlabeled_emb[miss_idx]
 
     proto_ids = sorted(prototypes.keys())
@@ -52,11 +63,11 @@ def rank_missed_candidates(
     emb_dist = dmat[np.arange(len(miss_idx)), nearest_proto_idx]
     emb_sim = np.exp(-emb_dist)
 
-    mm_map = mm_best.set_index("query_id") if not mm_best.empty else pd.DataFrame()
+    mm_map = mm_best.sort_values(["query_id", "bits"], ascending=[True, False]).drop_duplicates("query_id").set_index("query_id") if not mm_best.empty else pd.DataFrame()
     hmm_map = hmm_best.set_index("candidate_id") if not hmm_best.empty else pd.DataFrame()
 
     novelty = []
-    for cid in missed_ids:
+    for cid in valid_ids:
         mm_novel = 1.0
         hmm_novel = 1.0
 
@@ -66,9 +77,7 @@ def rank_missed_candidates(
             mm_novel = max(0.0, 1.0 - 0.6 * mm_fident - 0.4 * mm_qcov)
 
         if not hmm_best.empty and cid in hmm_map.index:
-            hv = float(hmm_map.loc[cid, "hmm_best_evalue"])
-            hmm_novel = min(1.0, np.log10(max(hv, 1e-300) + 1.0))
-            hmm_novel = max(0.0, hmm_novel)
+            hmm_novel = _novelty_from_hmm_evalue(float(hmm_map.loc[cid, "hmm_best_evalue"]))
 
         novelty.append(min(score_cfg.get("novelty_cap", 0.95), 0.5 * mm_novel + 0.5 * hmm_novel))
 
@@ -82,8 +91,8 @@ def rank_missed_candidates(
     medoid_map = medoids_df.set_index("cluster")["medoid_id"].to_dict()
     df = pd.DataFrame(
         {
-            "candidate_id": missed_ids,
-            "length": [lengths.get(cid, -1) for cid in missed_ids],
+            "candidate_id": valid_ids,
+            "length": [lengths.get(cid, -1) for cid in valid_ids],
             "nearest_positive_cluster": nearest_proto,
             "nearest_positive_id": [medoid_map.get(c, "NA") for c in nearest_proto],
             "embedding_distance": emb_dist,
@@ -93,30 +102,23 @@ def rank_missed_candidates(
         }
     )
 
-    mm_cols = ["query_id", "target_id", "fident", "qcov", "evalue"]
     if not mm_best.empty:
-        mm_meta = mm_best[mm_cols].rename(
+        mm_meta = mm_map.reset_index()[["query_id", "target_id", "fident", "alnlen", "qcov", "tcov", "evalue", "bits"]].rename(
             columns={
                 "query_id": "candidate_id",
                 "target_id": "mmseqs_best_target",
                 "fident": "mmseqs_best_fident",
+                "alnlen": "mmseqs_best_alnlen",
                 "qcov": "mmseqs_best_qcov",
+                "tcov": "mmseqs_best_tcov",
                 "evalue": "mmseqs_best_evalue",
+                "bits": "mmseqs_best_bits",
             }
         )
         df = df.merge(mm_meta, on="candidate_id", how="left")
 
     if not hmm_best.empty:
         df = df.merge(hmm_best, on="candidate_id", how="left")
-
-    if "hmm_best_cluster" in df:
-        df = df.rename(
-            columns={
-                "hmm_best_cluster": "hmm_best_cluster",
-                "hmm_best_bitscore": "hmm_best_bitscore",
-                "hmm_best_evalue": "hmm_best_evalue",
-            }
-        )
 
     w1 = score_cfg["w_affinity"]
     w2 = score_cfg["w_novelty"]

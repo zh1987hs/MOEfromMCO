@@ -128,8 +128,10 @@ def check_external_tools(msa_tool: str) -> dict[str, ToolCheckResult]:
             "- apt (partial): sudo apt-get install hmmer mafft muscle\n"
             "macOS examples:\n"
             "- brew: brew install mmseqs2 hmmer mafft muscle\n"
-            "Windows examples:\n"
-            "- Use WSL + conda/apt, or download binaries from official releases and add to PATH."
+            "Windows (PowerShell) examples:\n"
+            "- conda: conda install -c bioconda mmseqs2 hmmer mafft muscle\n"
+            "- chocolatey: choco install hmmer mafft muscle\n"
+            "- Prefer running MMseqs2/HMMER in WSL2 for best compatibility, or add native binaries to PATH."
         )
         raise RuntimeError(msg)
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Iterable
@@ -29,45 +28,73 @@ class ESMEmbedder:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        if device:
-            self.device = torch.device(device)
-        else:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(device) if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        self.backend: str
         try:
             from transformers import AutoModel, AutoTokenizer
-        except ImportError as exc:
-            raise RuntimeError(
-                "transformers not installed. Install with: pip install transformers"
-            ) from exc
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.model = AutoModel.from_pretrained(model_name)
+            self.backend = "transformers"
+        except ImportError:
+            try:
+                import esm
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Neither transformers nor fair-esm is installed. "
+                    "Install one of: pip install transformers  OR  pip install fair-esm"
+                ) from exc
+
+            if model_name != "facebook/esm2_t33_650M_UR50D":
+                raise RuntimeError(
+                    "fair-esm backend currently supports default ESM2 weights only. "
+                    "Use transformers for arbitrary model_name, or keep default facebook/esm2_t33_650M_UR50D."
+                )
+            self.model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
+            self.batch_converter = alphabet.get_batch_converter()
+            self.backend = "fair-esm"
+
         self.model.to(self.device)
         self.model.eval()
+        self.logger.info("ESM backend=%s device=%s model=%s", self.backend, self.device, self.model_name)
 
     @torch.no_grad()
-    def embed_sequences(self, ids: list[str], seqs: list[str]) -> np.ndarray:
+    def embed_sequences(self, seqs: list[str]) -> np.ndarray:
         """Embed a batch of sequences and return numpy matrix."""
-        encoded = self.tokenizer(
-            seqs,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=4096,
-        ).to(self.device)
+        if self.backend == "transformers":
+            encoded = self.tokenizer(
+                seqs,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=4096,
+            ).to(self.device)
+            outputs = self.model(**encoded)
+            hidden = outputs.last_hidden_state
+            if self.pooling == "cls":
+                emb = hidden[:, 0, :]
+            else:
+                attn_mask = encoded["attention_mask"].unsqueeze(-1)
+                sum_hidden = (hidden * attn_mask).sum(dim=1)
+                lengths = attn_mask.sum(dim=1).clamp(min=1)
+                emb = sum_hidden / lengths
+            return emb.detach().cpu().numpy().astype(np.float32)
 
-        outputs = self.model(**encoded)
-        hidden = outputs.last_hidden_state
-
+        batch = [(f"seq_{i}", s) for i, s in enumerate(seqs)]
+        _, _, toks = self.batch_converter(batch)
+        toks = toks.to(self.device)
+        out = self.model(toks, repr_layers=[33], return_contacts=False)
+        hidden = out["representations"][33]
         if self.pooling == "cls":
             emb = hidden[:, 0, :]
         else:
-            attn_mask = encoded["attention_mask"].unsqueeze(-1)
+            # fair-esm token 0 is BOS, and padded tokens are 1 in toks? use non-padding mask from != alphabet.padding_idx not available here
+            # approximation: use all non-zero token ids (excludes padding)
+            attn_mask = (toks != 1).unsqueeze(-1)
             sum_hidden = (hidden * attn_mask).sum(dim=1)
             lengths = attn_mask.sum(dim=1).clamp(min=1)
             emb = sum_hidden / lengths
-
         return emb.detach().cpu().numpy().astype(np.float32)
 
     def embed_records_with_cache(
@@ -76,14 +103,9 @@ class ESMEmbedder:
         dataset_name: str,
         shard_size: int,
     ) -> tuple[list[str], np.ndarray]:
-        """Embed records in shards with checkpoint/resume support."""
+        """Embed records in shards with checkpoint/resume support at shard granularity."""
         ids = [r.id for r in records]
         seqs = [str(r.seq) for r in records]
-
-        done_file = self.cache_dir / f"{dataset_name}_done_ids.json"
-        done_ids = set()
-        if done_file.exists():
-            done_ids = set(json.loads(done_file.read_text(encoding="utf-8")))
 
         all_ids: list[str] = []
         all_embs: list[np.ndarray] = []
@@ -100,21 +122,14 @@ class ESMEmbedder:
                 all_embs.append(payload["embeddings"])
                 continue
 
-            to_run = [(i, s) for i, s in zip(shard_ids, shard_seqs) if i not in done_ids]
-            if not to_run:
-                continue
-
             shard_embs: list[np.ndarray] = []
             shard_out_ids: list[str] = []
-            for b in range(0, len(to_run), self.batch_size):
-                batch = to_run[b : b + self.batch_size]
-                b_ids = [x[0] for x in batch]
-                b_seqs = [x[1] for x in batch]
-                emb = self.embed_sequences(b_ids, b_seqs)
+            for b in range(0, len(shard_ids), self.batch_size):
+                b_ids = shard_ids[b : b + self.batch_size]
+                b_seqs = shard_seqs[b : b + self.batch_size]
+                emb = self.embed_sequences(b_seqs)
                 shard_embs.append(emb)
                 shard_out_ids.extend(b_ids)
-                done_ids.update(b_ids)
-                done_file.write_text(json.dumps(sorted(done_ids)), encoding="utf-8")
 
             shard_arr = np.vstack(shard_embs)
             np.savez_compressed(shard_path, ids=np.array(shard_out_ids), embeddings=shard_arr)
