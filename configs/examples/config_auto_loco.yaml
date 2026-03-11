@@ -1,48 +1,33 @@
 input:
-  positives_fasta: "positives.fasta"          # backward compatibility
+  positives_fasta: "positives.fasta"
   unlabeled_fasta: "unlabeled_mco.fasta"
-
 positives:
   fasta: "positives.fasta"
-  metadata_csv: null                           # e.g. positive_metadata.csv
-
+  metadata_csv: null
 output:
   base_dir: "runs"
-
 random_seed: 42
-
 qc:
   min_len: 250
   max_len: 2000
   check_motif: false
-
 esm:
   model_name: "facebook/esm2_t33_650M_UR50D"
   batch_size: 8
-  pooling: "mean"  # mean or cls
-  device: null      # null => auto (cuda if available)
+  pooling: "mean"
+  device: null
   shard_size: 5000
-
-# New positive clustering config (supports fixed/auto/none)
 positive_clustering:
-  mode: "auto"                              # fixed | auto | none
-  fixed_cluster_csv: null                    # required when mode=fixed
-  methods: ["agglomerative", "kmeans"]    # used in auto mode
-  k_min: 3
-  k_max: 10
-
-# Optional legacy key; still accepted via backward compatibility
-clustering:
+  mode: "auto"
+  fixed_cluster_csv: null
   methods: ["agglomerative", "kmeans"]
   k_min: 3
   k_max: 10
-
 prototype:
-  representative: "prototype"   # prototype | medoid (reserved, current ranking uses prototype)
+  representative: "prototype"
   use_tier_weights: false
   gold_weight: 1.0
   silver_weight: 1.0
-
 mmseqs:
   threads: 16
   sensitivity: 7.5
@@ -50,12 +35,10 @@ mmseqs:
   evalue: 1.0e-3
   top_n: 5
   tmp_dir: "mmseqs_tmp"
-
 hmmer:
-  msa_tool: "mafft"   # mafft or muscle
+  msa_tool: "mafft"
   threads: 16
   evalue: 1.0e-3
-
 easy_hit:
   mmseqs:
     fident_min: 0.30
@@ -64,20 +47,17 @@ easy_hit:
   hmm:
     evalue_max: 1.0e-5
     bitscore_min: 50.0
-
 retrieval:
-  distance_metric: "cosine"  # cosine or euclidean
+  distance_metric: "cosine"
   novelty_cap: 0.95
   knn_k: 20
   w_affinity: 0.60
   w_novelty: 0.25
   w_local_support: 0.15
   top_n_export: 200
-
 evaluation:
-  mode: "loco"                       # loco | leave_one_gold_family_out
+  mode: "loco"
   leakage_guard: true
-
 cv:
   background_n: 5000
   k_values: [10, 20, 50, 100]
