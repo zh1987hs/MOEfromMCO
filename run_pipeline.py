@@ -26,6 +26,7 @@ from mnox.retrieval import (
     export_top_candidates,
     rank_candidates_with_policy,
 )
+from mnox.training_data import build_learned_training_data
 from mnox.utils import (
     check_external_tools,
     check_python_dependencies,
@@ -282,43 +283,24 @@ def main() -> None:
     train_labels = None
     if scorer_mode == "learned" and bool(cfg["retrieval"].get("learned", {}).get("enabled", True)):
         try:
-            # fold-free discovery training: positives vs sampled background/hard-negatives
-            neg_n = min(int(cfg["retrieval"]["learned"].get("negative_background_n", 5000)), len(unl_ids_emb))
-            rng = np.random.default_rng(cfg["random_seed"])
-            neg_ids = rng.choice(unl_ids_emb, size=neg_n, replace=False).tolist()
-
-            pos_feat = build_missed_candidate_features(
-                missed_ids=pos_ids_emb,
-                unlabeled_ids=pos_ids_emb,
-                unlabeled_emb=pos_emb,
+            lengths_all = {**{r.id: len(r.seq) for r in pos_qc.kept_records}, **{r.id: len(r.seq) for r in unl_qc.kept_records}}
+            t_res = build_learned_training_data(
                 positive_ids=pos_ids_emb,
                 positive_emb=pos_emb,
                 positive_labels=labels,
-                lengths={**{r.id: len(r.seq) for r in pos_qc.kept_records}, **{r.id: len(r.seq) for r in unl_qc.kept_records}},
                 medoids_df=medoids_df,
                 metadata_df=metadata_df,
                 mm_best=mm_df,
                 hmm_best=hmm_best,
-                cfg=cfg["retrieval"],
-            ).features
-            neg_emb = np.vstack([unl_emb[unl_ids_emb.index(x)] for x in neg_ids])
-            neg_feat = build_missed_candidate_features(
-                missed_ids=neg_ids,
-                unlabeled_ids=neg_ids,
-                unlabeled_emb=neg_emb,
-                positive_ids=pos_ids_emb,
-                positive_emb=pos_emb,
-                positive_labels=labels,
-                lengths={**{r.id: len(r.seq) for r in pos_qc.kept_records}, **{r.id: len(r.seq) for r in unl_qc.kept_records}},
-                medoids_df=medoids_df,
-                metadata_df=metadata_df,
-                mm_best=mm_df,
-                hmm_best=hmm_best,
-                cfg=cfg["retrieval"],
-            ).features
-            train_feature_df = pd.concat([pos_feat, neg_feat], ignore_index=True, sort=False)
-            train_labels = np.array([1] * len(pos_feat) + [0] * len(neg_feat))
-            logger.info("Discovery learned scorer training enabled: n_pos=%d n_neg=%d", len(pos_feat), len(neg_feat))
+                lengths=lengths_all,
+                retrieval_cfg=cfg["retrieval"],
+                random_seed=cfg["random_seed"],
+                background_ids=unl_ids_emb,
+                background_emb=unl_emb,
+            )
+            train_feature_df = t_res.features
+            train_labels = t_res.labels
+            logger.info("Discovery learned scorer training enabled: n_pos=%d n_neg=%d", t_res.n_pos, t_res.n_neg)
         except Exception as exc:
             logger.warning("Discovery learned scorer training failed; fallback to heuristic. reason=%s", exc)
             train_feature_df = None
@@ -359,6 +341,8 @@ def main() -> None:
         "flags",
         "reason_for_high_rank",
         "experimental_priority_rank",
+        "false_positive_risk",
+        "generic_mco_risk_score",
         "easy_or_missed",
     ]
     exp_view = ranked[[c for c in experimental_cols if c in ranked.columns]].copy()

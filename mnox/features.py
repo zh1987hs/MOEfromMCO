@@ -130,16 +130,36 @@ def build_missed_candidate_features(
     emb_dist = dmat[np.arange(len(valid_ids)), nearest_proto_idx]
     emb_sim = np.exp(-emb_dist)
 
-    # Positive support: top-k similarity to positives inside nearest cluster.
+    # Positive support: combine top-k in-cluster similarity + medoid + prototype support.
     support_topk = int(cfg.get("support_topk", 5))
+    id_to_pos_idx = {pid: i for i, pid in enumerate(positive_ids)}
+
     pos_support = []
     for i, cid in enumerate(nearest_cluster):
         idx = cluster_member_idx[int(cid)]
         cand = miss_emb[i : i + 1]
+
         sims = 1.0 - pairwise_distances(cand, positive_emb[idx], metric="cosine").reshape(-1)
         sims = np.sort(sims)[::-1]
         k = min(len(sims), max(1, support_topk))
-        pos_support.append(float(np.clip(np.mean(sims[:k]), 0.0, 1.0)))
+        topk_support = float(np.mean(sims[:k]))
+
+        proto_support = float(np.clip(1.0 - emb_dist[i], 0.0, 1.0))
+
+        medoid_support = topk_support
+        mid = medoid_map.get(int(cid))
+        if mid in id_to_pos_idx:
+            m_i = id_to_pos_idx[mid]
+            medoid_support = float(
+                np.clip(
+                    1.0 - pairwise_distances(cand, positive_emb[m_i : m_i + 1], metric="cosine")[0, 0],
+                    0.0,
+                    1.0,
+                )
+            )
+
+        comb = 0.60 * np.clip(topk_support, 0.0, 1.0) + 0.25 * medoid_support + 0.15 * proto_support
+        pos_support.append(float(np.clip(comb, 0.0, 1.0)))
 
     # Local density in unlabeled space (auxiliary signal only).
     k_den = int(cfg.get("density_knn_k", cfg.get("knn_k", 20)))
@@ -149,7 +169,6 @@ def build_missed_candidate_features(
     mean_neighbor_dist = dist[:, 1:].mean(axis=1) if dist.shape[1] > 1 else np.ones(len(miss_emb))
     local_density = np.exp(-mean_neighbor_dist)
 
-    medoid_map = medoids_df.set_index("cluster")["medoid_id"].to_dict() if not medoids_df.empty else {}
     family_map = {}
     if metadata_df is not None and {"positive_id", "gold_family"}.issubset(set(metadata_df.columns)):
         family_map = dict(zip(metadata_df["positive_id"], metadata_df["gold_family"]))
@@ -262,5 +281,11 @@ def build_missed_candidate_features(
     feats["dominant_signal_type"] = dominant
     feats["flags"] = flags
     feats["reason_for_high_rank"] = reasons
+
+    # explicit risk diagnostics for experimental triage
+    generic_score = np.clip(0.7 * feats["local_density_score"] + 0.3 * (1.0 - feats["positive_support_score"]), 0.0, 1.0)
+    fp_risk = np.clip(0.5 * generic_score + 0.5 * (1.0 - feats["embedding_similarity"]), 0.0, 1.0)
+    feats["generic_mco_risk_score"] = generic_score
+    feats["false_positive_risk"] = fp_risk
 
     return FeatureBuildResult(features=feats)

@@ -11,6 +11,7 @@ __all__ = [
     "retrieval",
     "features",
     "scoring",
+    "training_data",
     "eval_cv",
     "plots",
 ]

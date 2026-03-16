@@ -16,6 +16,7 @@ from .io_fasta import write_fasta_records
 from .mmseqs import make_easy_hit_flags, run_mmseqs_search
 from .retrieval import build_easy_and_missed_sets, rank_candidates_with_policy
 from .scoring import apply_heuristic_scorer
+from .training_data import build_learned_training_data
 from .utils import ensure_dir
 
 
@@ -250,41 +251,23 @@ def _run_fold_aligned(
     if learned_enabled and len(feat_res.features) > 5 and len(train_ids) > 3:
         from .scoring import apply_learned_scorer
 
-        neg_n = min(int(cfg["retrieval"]["learned"].get("negative_background_n", 5000)), len(bg_ids))
-        neg_ids = bg_ids[:neg_n]
-        pos_train_feat = build_missed_candidate_features(
-            missed_ids=train_ids,
-            unlabeled_ids=train_ids,
-            unlabeled_emb=train_emb,
-            positive_ids=train_ids,
-            positive_emb=train_emb,
-            positive_labels=train_labels,
-            lengths=lengths,
-            medoids_df=medoids,
-            metadata_df=metadata_df,
-            mm_best=mm_df,
-            hmm_best=hmm_best,
-            cfg=cfg["retrieval"],
-        ).features
-        neg_emb = np.vstack([unlabeled_emb[unlabeled_ids.index(q)] for q in neg_ids])
-        neg_feat = build_missed_candidate_features(
-            missed_ids=neg_ids,
-            unlabeled_ids=neg_ids,
-            unlabeled_emb=neg_emb,
-            positive_ids=train_ids,
-            positive_emb=train_emb,
-            positive_labels=train_labels,
-            lengths=lengths,
-            medoids_df=medoids,
-            metadata_df=metadata_df,
-            mm_best=mm_df,
-            hmm_best=hmm_best,
-            cfg=cfg["retrieval"],
-        ).features
-        train_f = pd.concat([pos_train_feat, neg_feat], ignore_index=True, sort=False)
-        y = np.array([1] * len(pos_train_feat) + [0] * len(neg_feat))
         try:
-            learned = apply_learned_scorer(feat_res.features, train_f, y, cfg["retrieval"]).scored
+            bg_emb = np.vstack([unlabeled_emb[unlabeled_ids.index(q)] for q in bg_ids]) if len(bg_ids) else np.empty((0, train_emb.shape[1]))
+            t_res = build_learned_training_data(
+                positive_ids=train_ids,
+                positive_emb=train_emb,
+                positive_labels=train_labels,
+                medoids_df=medoids,
+                metadata_df=metadata_df,
+                mm_best=mm_df,
+                hmm_best=hmm_best,
+                lengths=lengths,
+                retrieval_cfg=cfg["retrieval"],
+                random_seed=cfg["random_seed"],
+                background_ids=bg_ids,
+                background_emb=bg_emb,
+            )
+            learned = apply_learned_scorer(feat_res.features, t_res.features, t_res.labels, cfg["retrieval"]).scored
             rank_ids = ranked_h[ranked_h.get("easy_or_missed", "") == "easy"]["candidate_id"].tolist() + learned["candidate_id"].tolist()
             rows.append({"method": "hybrid_learned", "scoring_mode": "learned", **_evaluate_rank(rank_ids, true_set, k_values)})
         except Exception:

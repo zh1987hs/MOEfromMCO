@@ -48,7 +48,7 @@ family-aware 模式下：
 
 见 `config.yaml`：
 
-- `retrieval.scorer`: `heuristic | learned`
+- `retrieval.scorer`: `heuristic | learned`（默认建议 `heuristic` 作为稳定主线，`learned` 作为可选增强）
 - `retrieval.easy_hit_policy`: `prepend | merge`
 - `retrieval.support_topk`
 - `retrieval.density_knn_k`
@@ -105,3 +105,12 @@ python run_pipeline.py
   - `prepend`：easy 在前，missed 在后。
   - `merge`：按统一分数融合。
 - `ranked_candidates_experimental_view.csv` 即最终实验优先级视图。
+
+
+## Experimental view 字段补充
+
+`ranked_candidates_experimental_view.csv` 现在额外包含：
+- `false_positive_risk`：综合风险分数（越高越需谨慎）
+- `generic_mco_risk_score`：落在 generic MCO 密集背景区的风险
+
+建议优先挑选：`high confidence_tier` 且 `positive_support_score` 高、`false_positive_risk` 低的候选。

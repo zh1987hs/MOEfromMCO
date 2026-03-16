@@ -93,15 +93,27 @@ def apply_learned_scorer(
 
     standardize = bool(lcfg.get("standardize_features", True))
     if standardize:
-        model: Any = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(max_iter=2000))])
+        model: Any = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(max_iter=2000, class_weight="balanced"))])
     else:
-        model = LogisticRegression(max_iter=2000)
+        model = LogisticRegression(max_iter=2000, class_weight="balanced")
 
-    model.fit(x_train, train_labels)
+    # lightweight prioritization-oriented weighting: emphasize supported positives and hard negatives.
+    sw = np.ones(len(train_labels), dtype=float)
+    if "positive_support_score" in train_df.columns:
+        sw = np.where(train_labels == 1, 1.0 + 1.5 * np.clip(train_df["positive_support_score"].fillna(0.0).values, 0.0, 1.0), sw)
+    if "local_density_score" in train_df.columns:
+        sw = np.where(train_labels == 0, sw * (1.0 + 0.8 * np.clip(train_df["local_density_score"].fillna(0.0).values, 0.0, 1.0)), sw)
+
+    if isinstance(model, Pipeline):
+        model.fit(x_train, train_labels, clf__sample_weight=sw)
+    else:
+        model.fit(x_train, train_labels, sample_weight=sw)
     proba = model.predict_proba(x_pred)[:, 1]
 
     out = pred_df.copy()
-    out["final_score"] = proba
+    # keep novelty as small correction in learned mode too
+    nov = out.get("novelty_score", pd.Series(np.zeros(len(out)))).fillna(0.0).values
+    out["final_score"] = np.clip(0.97 * proba + 0.03 * nov, 0.0, 1.0)
     out = out.sort_values("final_score", ascending=False).reset_index(drop=True)
     out["rank"] = np.arange(1, len(out) + 1)
     out["scoring_mode"] = "learned_logistic"
