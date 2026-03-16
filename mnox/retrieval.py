@@ -82,23 +82,37 @@ def rank_candidates_with_policy(
     train_labels: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
     """Rank easy + missed candidates with configurable scorer and merge policy."""
-    easy_df = build_easy_rank_table(candidate_ids, mm_best, hmm_best, mm_flags, hmm_flags)
+    # Respect upstream split explicitly; avoid recomputing semantic split silently.
+    cand_set = set(candidate_ids)
+    easy_ids = [x for x in easy_ids if x in cand_set]
+    missed_ids = [x for x in missed_ids if x in cand_set]
 
-    if scorer_mode == "learned" and train_feature_df is not None and train_labels is not None:
-        try:
-            scored_res: ScoringResult = apply_learned_scorer(
-                feature_result.features,
-                train_feature_df,
-                train_labels,
-                retrieval_cfg,
-            )
-        except Exception:
-            scored_res = apply_heuristic_scorer(feature_result.features, retrieval_cfg)
+    easy_df = build_easy_rank_table(easy_ids, mm_best, hmm_best, mm_flags, hmm_flags)
+
+    missed_feature_df = feature_result.features.copy()
+    if not missed_feature_df.empty:
+        missed_feature_df = missed_feature_df[missed_feature_df["candidate_id"].isin(missed_ids)].copy()
+
+    if missed_feature_df.empty:
+        missed_df = pd.DataFrame(columns=["candidate_id", "final_score", "rank", "scoring_mode", "easy_or_missed"])
+        fi = None
     else:
-        scored_res = apply_heuristic_scorer(feature_result.features, retrieval_cfg)
+        if scorer_mode == "learned" and train_feature_df is not None and train_labels is not None:
+            try:
+                scored_res: ScoringResult = apply_learned_scorer(
+                    missed_feature_df,
+                    train_feature_df,
+                    train_labels,
+                    retrieval_cfg,
+                )
+            except Exception:
+                scored_res = apply_heuristic_scorer(missed_feature_df, retrieval_cfg)
+        else:
+            scored_res = apply_heuristic_scorer(missed_feature_df, retrieval_cfg)
 
-    missed_df = scored_res.scored.copy()
-    fi = scored_res.feature_importance
+        missed_df = scored_res.scored.copy()
+        missed_df["easy_or_missed"] = "missed"
+        fi = scored_res.feature_importance
 
     policy = retrieval_cfg.get("easy_hit_policy", "prepend")
     if policy == "merge":
@@ -119,7 +133,7 @@ def rank_candidates_with_policy(
     combined["rank"] = np.arange(1, len(combined) + 1)
     combined["experimental_priority_rank"] = combined["rank"]
 
-    return combined, feature_result.features, fi
+    return combined, missed_feature_df, fi
 
 
 def export_top_candidates(

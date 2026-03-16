@@ -99,7 +99,7 @@ python run_pipeline.py
 
 ## 主流程排序语义（已接线）
 
-- 先做 `easy/missed` 分流。
+- 先做 `easy/missed` 分流（主流程显式使用上游 `easy_ids/missed_ids`，不在合并阶段隐式重分流）。
 - `missed` 先构建特征，再按 `retrieval.scorer`（`heuristic` 或 `learned`）打分。
 - 再按 `retrieval.easy_hit_policy` 合并：
   - `prepend`：easy 在前，missed 在后。
