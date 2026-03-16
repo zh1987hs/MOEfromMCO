@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import platform
 import time
 from pathlib import Path
@@ -14,12 +15,17 @@ from mnox.cluster import (
 )
 from mnox.esm_embed import ESMEmbedder, write_runtime_log
 from mnox.eval_cv import run_leave_one_gold_family_out_cv, run_loco_cv
+from mnox.features import build_missed_candidate_features
 from mnox.hmmer import build_cluster_hmms, make_hmm_easy_flags, run_hmmsearch_for_clusters
 from mnox.io_fasta import id_to_seq_dict, read_fasta_records, write_fasta_records
 from mnox.mmseqs import make_easy_hit_flags, run_mmseqs_search
 from mnox.plots import plot_cv_metrics
 from mnox.qc import dedupe_and_filter, qc_summary_dict, save_duplicate_map
-from mnox.retrieval import build_easy_and_missed_sets, export_top_candidates, rank_missed_candidates
+from mnox.retrieval import (
+    build_easy_and_missed_sets,
+    export_top_candidates,
+    rank_candidates_with_policy,
+)
 from mnox.utils import (
     check_external_tools,
     check_python_dependencies,
@@ -68,6 +74,34 @@ def _resolve_config(cfg: dict) -> dict:
     if "cv" not in cfg:
         cfg["cv"] = {"background_n": 5000, "k_values": [10, 20, 50, 100]}
 
+    if "retrieval" not in cfg:
+        cfg["retrieval"] = {}
+    r = cfg["retrieval"]
+    r.setdefault("scorer", "heuristic")
+    r.setdefault("affinity_metric", r.get("distance_metric", "cosine"))
+    r.setdefault("easy_hit_policy", "prepend")
+    r.setdefault("support_topk", 5)
+    r.setdefault("density_knn_k", r.get("knn_k", 20))
+    r.setdefault("novelty_cap", 0.9)
+    r.setdefault(
+        "heuristic",
+        {
+            "w_affinity": r.get("w_affinity", 0.75),
+            "w_positive_support": 0.15,
+            "w_local_density": r.get("w_local_support", 0.08),
+            "w_novelty": r.get("w_novelty", 0.02),
+        },
+    )
+    r.setdefault(
+        "learned",
+        {
+            "enabled": True,
+            "model_type": "logistic",
+            "negative_background_n": 5000,
+            "standardize_features": True,
+            "use_hard_negatives": True,
+        },
+    )
     return cfg
 
 
@@ -107,9 +141,13 @@ def main() -> None:
         logger.info("For large data, keep FASTA/outputs inside WSL filesystem (e.g. ~/projects), not /mnt/c.")
 
     logger.info("positive_clustering.mode=%s", cfg["positive_clustering"]["mode"])
-    logger.info("evaluation.mode=%s leakage_guard=%s", cfg["evaluation"]["mode"], cfg["evaluation"].get("leakage_guard", True))
+    logger.info(
+        "evaluation.mode=%s leakage_guard=%s",
+        cfg["evaluation"]["mode"],
+        cfg["evaluation"].get("leakage_guard", True),
+    )
+    logger.info("retrieval.scorer=%s easy_hit_policy=%s", cfg["retrieval"]["scorer"], cfg["retrieval"]["easy_hit_policy"])
 
-    # Step 0
     check_python_dependencies()
     check_external_tools(cfg["hmmer"]["msa_tool"])
 
@@ -118,24 +156,16 @@ def main() -> None:
     unl_raw = read_fasta_records(cfg["input"]["unlabeled_fasta"])
 
     qc_cfg = cfg["qc"]
-    pos_qc = dedupe_and_filter(
-        pos_raw,
-        min_len=qc_cfg["min_len"],
-        max_len=qc_cfg["max_len"],
-        check_motif=qc_cfg["check_motif"],
-    )
-    unl_qc = dedupe_and_filter(
-        unl_raw,
-        min_len=qc_cfg["min_len"],
-        max_len=qc_cfg["max_len"],
-        check_motif=qc_cfg["check_motif"],
-    )
+    pos_qc = dedupe_and_filter(pos_raw, qc_cfg["min_len"], qc_cfg["max_len"], qc_cfg["check_motif"])
+    unl_qc = dedupe_and_filter(unl_raw, qc_cfg["min_len"], qc_cfg["max_len"], qc_cfg["check_motif"])
 
     metadata_df = _load_positive_metadata(cfg["positives"].get("metadata_csv"), pos_qc.kept_ids)
-    gold_n = int((metadata_df["tier"].str.lower() == "gold").sum())
-    silver_n = int((metadata_df["tier"].str.lower() == "silver").sum())
-    family_n = int(metadata_df["gold_family"].nunique())
-    logger.info("positive tier counts: gold=%d silver=%d families=%d", gold_n, silver_n, family_n)
+    logger.info(
+        "positive tier counts: gold=%d silver=%d families=%d",
+        int((metadata_df["tier"].str.lower() == "gold").sum()),
+        int((metadata_df["tier"].str.lower() == "silver").sum()),
+        int(metadata_df["gold_family"].nunique()),
+    )
 
     write_fasta_records(pos_qc.kept_records, run_dir / "positives_qc.fasta")
     write_fasta_records(unl_qc.kept_records, run_dir / "unlabeled_qc.fasta")
@@ -159,26 +189,20 @@ def main() -> None:
     )
 
     t0 = time.time()
-    pos_ids_emb, pos_emb = embedder.embed_records_with_cache(
-        pos_qc.kept_records, "positives", cfg["esm"]["shard_size"]
-    )
+    pos_ids_emb, pos_emb = embedder.embed_records_with_cache(pos_qc.kept_records, "positives", cfg["esm"]["shard_size"])
     runtime_lines.append(f"positives_embedding_seconds={time.time() - t0:.2f}")
     np.savez_compressed(emb_dir / "positives_embeddings.npz", ids=np.array(pos_ids_emb), embeddings=pos_emb)
 
     t1 = time.time()
-    unl_ids_emb, unl_emb = embedder.embed_records_with_cache(
-        unl_qc.kept_records, "unlabeled", cfg["esm"]["shard_size"]
-    )
+    unl_ids_emb, unl_emb = embedder.embed_records_with_cache(unl_qc.kept_records, "unlabeled", cfg["esm"]["shard_size"])
     runtime_lines.append(f"unlabeled_embedding_seconds={time.time() - t1:.2f}")
     np.savez_compressed(emb_dir / "unlabeled_embeddings_full.npz", ids=np.array(unl_ids_emb), embeddings=unl_emb)
     write_runtime_log(run_dir / "embedding_runtime_log.txt", runtime_lines)
 
-    # Step 3
+    # Step 3 positive clustering/prototypes
     cl_cfg = cfg["positive_clustering"]
     mode = cl_cfg["mode"]
     if mode == "fixed":
-        if not cl_cfg.get("fixed_cluster_csv"):
-            raise RuntimeError("positive_clustering.mode=fixed requires fixed_cluster_csv")
         labels = load_fixed_clusters(cl_cfg["fixed_cluster_csv"], pos_ids_emb, metadata_df)
         cl_method, cl_k, cl_score, cl_source = "fixed", int(len(set(labels))), float("nan"), "fixed"
     elif mode == "none":
@@ -187,10 +211,10 @@ def main() -> None:
     else:
         cl_out = pick_best_clustering(
             pos_emb,
-            methods=cl_cfg["methods"],
-            k_min=cl_cfg["k_min"],
-            k_max=cl_cfg["k_max"],
-            random_state=cfg["random_seed"],
+            cl_cfg["methods"],
+            cl_cfg["k_min"],
+            cl_cfg["k_max"],
+            cfg["random_seed"],
             logger=logger,
         )
         labels = cl_out.labels
@@ -206,8 +230,7 @@ def main() -> None:
         gold_weight=float(proto_cfg.get("gold_weight", 1.0)),
         silver_weight=float(proto_cfg.get("silver_weight", 1.0)),
     )
-    cluster_df = cluster_df.rename(columns={"id": "positive_id"})
-    cluster_df = cluster_df.merge(metadata_df, on="positive_id", how="left")
+    cluster_df = cluster_df.rename(columns={"id": "positive_id"}).merge(metadata_df, on="positive_id", how="left")
     cluster_df["method"] = cl_method
     cluster_df["k"] = cl_k
     cluster_df["silhouette"] = cl_score
@@ -216,87 +239,114 @@ def main() -> None:
     np.savez_compressed(run_dir / "positive_prototypes.npz", **{f"cluster_{k}": v for k, v in prototypes.items()})
     medoids_df.to_csv(run_dir / "positive_medoids.csv", index=False)
 
-    # Step 4
-    mm_df = run_mmseqs_search(
-        run_dir / "positives_qc.fasta",
-        run_dir / "unlabeled_qc.fasta",
-        run_dir,
-        cfg["mmseqs"],
-        logger,
-    )
-    mm_path = write_dataframe(mm_df, run_dir / "mmseqs_results", logger)
-    logger.info("MMseqs results -> %s", mm_path)
+    # Step 4/5 baseline retrieval
+    mm_df = run_mmseqs_search(run_dir / "positives_qc.fasta", run_dir / "unlabeled_qc.fasta", run_dir, cfg["mmseqs"], logger)
+    write_dataframe(mm_df, run_dir / "mmseqs_results", logger)
     mm_flags = make_easy_hit_flags(mm_df, cfg["easy_hit"]["mmseqs"])
     mm_flags.to_csv(run_dir / "mmseqs_easy_hit_flags.csv", index=False)
 
-    # Step 5
     pos_id_to_rec = {r.id: r for r in pos_qc.kept_records}
-    cluster_to_records = {
-        int(cid): [pos_id_to_rec[x] for x in sub["positive_id"].tolist()]
-        for cid, sub in cluster_df.groupby("cluster")
-    }
-    hmm_paths = build_cluster_hmms(
-        cluster_to_records,
-        run_dir,
-        msa_tool=cfg["hmmer"]["msa_tool"],
-        threads=cfg["hmmer"]["threads"],
-        logger=logger,
-    )
+    cluster_to_records = {int(cid): [pos_id_to_rec[x] for x in sub["positive_id"].tolist()] for cid, sub in cluster_df.groupby("cluster")}
+    hmm_paths = build_cluster_hmms(cluster_to_records, run_dir, cfg["hmmer"]["msa_tool"], cfg["hmmer"]["threads"], logger)
     hmm_best = run_hmmsearch_for_clusters(hmm_paths, run_dir / "unlabeled_qc.fasta", run_dir, cfg["hmmer"], logger)
-    hmm_path = write_dataframe(hmm_best, run_dir / "hmm_results", logger)
-    logger.info("HMM results -> %s", hmm_path)
+    write_dataframe(hmm_best, run_dir / "hmm_results", logger)
     hmm_flags = make_hmm_easy_flags(hmm_best, cfg["easy_hit"]["hmm"])
     hmm_flags.to_csv(run_dir / "hmm_easy_hit_flags.csv", index=False)
 
-    # Step 6
+    # Step 6 easy/missed split
     easy_ids, missed_ids = build_easy_and_missed_sets(unl_ids_emb, mm_flags, hmm_flags)
     write_lines(easy_ids, run_dir / "easy_ids.txt")
     write_lines(missed_ids, run_dir / "missed_ids.txt")
 
-    # Step 7
+    # Step 7 features + scoring + final merge
     lengths = {r.id: len(r.seq) for r in unl_qc.kept_records}
-    ranked = rank_missed_candidates(
+    feat_res = build_missed_candidate_features(
         missed_ids=missed_ids,
         unlabeled_ids=unl_ids_emb,
         unlabeled_emb=unl_emb,
+        positive_ids=pos_ids_emb,
+        positive_emb=pos_emb,
+        positive_labels=labels,
         lengths=lengths,
-        prototypes=prototypes,
         medoids_df=medoids_df,
+        metadata_df=metadata_df,
         mm_best=mm_df,
         hmm_best=hmm_best,
-        score_cfg=cfg["retrieval"],
+        cfg=cfg["retrieval"],
     )
+
+    # discovery stage defaults to heuristic unless explicitly requested
+    scorer_mode = cfg["retrieval"].get("scorer", "heuristic")
+    ranked, feat_df, fi_df = rank_candidates_with_policy(
+        candidate_ids=unl_ids_emb,
+        easy_ids=easy_ids,
+        missed_ids=missed_ids,
+        mm_best=mm_df,
+        hmm_best=hmm_best,
+        mm_flags=mm_flags,
+        hmm_flags=hmm_flags,
+        feature_result=feat_res,
+        retrieval_cfg=cfg["retrieval"],
+        scorer_mode=scorer_mode,
+        train_feature_df=None,
+        train_labels=None,
+    )
+
     ranked = ranked.merge(mm_flags, on="candidate_id", how="left")
     ranked = ranked.merge(hmm_flags, on="candidate_id", how="left")
     ranked["mmseqs_easy_hit_flag"] = ranked["mmseqs_easy_hit_flag"].fillna(False).astype(bool)
     ranked["hmm_easy_hit_flag"] = ranked["hmm_easy_hit_flag"].fillna(False).astype(bool)
-    rank_path = write_dataframe(ranked, run_dir / "ranked_candidates", logger)
-    logger.info("Ranked candidates -> %s", rank_path)
+
+    write_dataframe(ranked, run_dir / "ranked_candidates", logger)
+    feat_df.to_csv(run_dir / "ranked_candidates_features.csv", index=False)
+
+    experimental_cols = [
+        "candidate_id",
+        "final_score",
+        "rank",
+        "nearest_positive_id",
+        "nearest_positive_cluster",
+        "nearest_positive_family",
+        "dominant_signal_type",
+        "confidence_tier",
+        "flags",
+        "reason_for_high_rank",
+        "experimental_priority_rank",
+        "easy_or_missed",
+    ]
+    exp_view = ranked[[c for c in experimental_cols if c in ranked.columns]].copy()
+    exp_view = exp_view.rename(columns={"dominant_signal_type": "main_supporting_signals", "flags": "risk_flags"})
+    exp_view.to_csv(run_dir / "ranked_candidates_experimental_view.csv", index=False)
+
+    if fi_df is not None and not fi_df.empty:
+        fi_df.to_csv(run_dir / "feature_importance.csv", index=False)
 
     unl_seqs = id_to_seq_dict(run_dir / "unlabeled_qc.fasta")
     export_top_candidates(ranked, unl_seqs, run_dir, cfg["retrieval"]["top_n_export"])
 
-    # Step 8
+    # Step 8 CV (aligned with discovery flow)
     eval_mode = cfg["evaluation"]["mode"]
     if eval_mode == "leave_one_gold_family_out":
-        cv_df = run_leave_one_gold_family_out_cv(
+        cv_df, diag = run_leave_one_gold_family_out_cv(
             positive_records=pos_qc.kept_records,
             positive_ids=pos_ids_emb,
             positive_emb=pos_emb,
+            positive_labels=labels,
+            metadata_df=metadata_df,
             unlabeled_records=unl_qc.kept_records,
             unlabeled_ids=unl_ids_emb,
             unlabeled_emb=unl_emb,
-            metadata_df=metadata_df,
             cfg=cfg,
             run_dir=run_dir,
             logger=logger,
         )
     else:
-        cv_df = run_loco_cv(
+        cv_df, diag = run_loco_cv(
             positive_records=pos_qc.kept_records,
             positive_ids=pos_ids_emb,
             positive_labels=labels,
             positive_emb=pos_emb,
+            metadata_df=metadata_df,
             unlabeled_records=unl_qc.kept_records,
             unlabeled_ids=unl_ids_emb,
             unlabeled_emb=unl_emb,
@@ -306,8 +356,24 @@ def main() -> None:
         )
 
     cv_df.to_csv(run_dir / "cv_summary.csv", index=False)
-    plot_cv_metrics(cv_df, run_dir / "plots")
+    save_json(diag, run_dir / "cv_fold_diagnostics.json")
+    with (run_dir / "cv_method_config_used.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "evaluation": cfg["evaluation"],
+                "positive_clustering": cfg["positive_clustering"],
+                "retrieval": cfg["retrieval"],
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
 
+    # simple ablation summary
+    ablation = cv_df.groupby(["method", "scoring_mode"], as_index=False)[[c for c in cv_df.columns if c.startswith("recall@") or c.startswith("ef@") or c == "mrr"]].mean(numeric_only=True)
+    ablation.to_csv(run_dir / "ablation_summary.csv", index=False)
+
+    plot_cv_metrics(cv_df, run_dir / "plots")
     logger.info("Pipeline finished successfully.")
 
 

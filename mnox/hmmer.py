@@ -92,6 +92,7 @@ def run_hmmsearch_for_clusters(
             "evalue": "hmm_best_evalue",
         }
     )
+    best["hmm_best_target"] = best["hmm_best_cluster"].map(lambda x: f"cluster_{int(x)}")
     return best
 
 

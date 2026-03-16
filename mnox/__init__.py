@@ -9,6 +9,8 @@ __all__ = [
     "mmseqs",
     "hmmer",
     "retrieval",
+    "features",
+    "scoring",
     "eval_cv",
     "plots",
 ]

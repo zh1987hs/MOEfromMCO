@@ -4,7 +4,7 @@ input:
 
 positives:
   fasta: "positives.fasta"
-  metadata_csv: null                           # e.g. positive_metadata.csv
+  metadata_csv: null
 
 output:
   base_dir: "runs"
@@ -19,26 +19,24 @@ qc:
 esm:
   model_name: "facebook/esm2_t33_650M_UR50D"
   batch_size: 8
-  pooling: "mean"  # mean or cls
-  device: null      # null => auto (cuda if available)
+  pooling: "mean"
+  device: null
   shard_size: 5000
 
-# New positive clustering config (supports fixed/auto/none)
 positive_clustering:
-  mode: "auto"                              # fixed | auto | none
-  fixed_cluster_csv: null                    # required when mode=fixed
-  methods: ["agglomerative", "kmeans"]    # used in auto mode
-  k_min: 3
-  k_max: 10
-
-# Optional legacy key; still accepted via backward compatibility
-clustering:
+  mode: "auto"                               # fixed | auto | none
+  fixed_cluster_csv: null
   methods: ["agglomerative", "kmeans"]
   k_min: 3
   k_max: 10
 
+clustering:
+  methods: ["agglomerative", "kmeans"]      # legacy compatibility
+  k_min: 3
+  k_max: 10
+
 prototype:
-  representative: "prototype"   # prototype | medoid (reserved, current ranking uses prototype)
+  representative: "prototype"
   use_tier_weights: false
   gold_weight: 1.0
   silver_weight: 1.0
@@ -52,7 +50,7 @@ mmseqs:
   tmp_dir: "mmseqs_tmp"
 
 hmmer:
-  msa_tool: "mafft"   # mafft or muscle
+  msa_tool: "mafft"
   threads: 16
   evalue: 1.0e-3
 
@@ -66,16 +64,37 @@ easy_hit:
     bitscore_min: 50.0
 
 retrieval:
-  distance_metric: "cosine"  # cosine or euclidean
-  novelty_cap: 0.95
+  scorer: "heuristic"              # heuristic | learned
+  affinity_metric: "cosine"
+  easy_hit_policy: "prepend"       # prepend | merge
+  support_topk: 5
+  density_knn_k: 10
+  novelty_cap: 0.90
+
+  # legacy fields (still read)
+  distance_metric: "cosine"
   knn_k: 20
   w_affinity: 0.60
   w_novelty: 0.25
   w_local_support: 0.15
+
+  heuristic:
+    w_affinity: 0.75
+    w_positive_support: 0.15
+    w_local_density: 0.08
+    w_novelty: 0.02
+
+  learned:
+    enabled: true
+    model_type: "logistic"
+    negative_background_n: 5000
+    standardize_features: true
+    use_hard_negatives: true
+
   top_n_export: 200
 
 evaluation:
-  mode: "loco"                       # loco | leave_one_gold_family_out
+  mode: "loco"                        # loco | leave_one_gold_family_out
   leakage_guard: true
 
 cv:

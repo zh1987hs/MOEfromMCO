@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
-from sklearn.metrics import pairwise_distances
-from sklearn.neighbors import NearestNeighbors
 
+from .features import FeatureBuildResult, build_easy_rank_table, build_missed_candidate_features
 from .io_fasta import write_fasta_records
+from .scoring import ScoringResult, apply_heuristic_scorer, apply_learned_scorer
 
 
 def build_easy_and_missed_sets(
@@ -28,13 +29,6 @@ def build_easy_and_missed_sets(
     return easy_ids, missed_ids
 
 
-def _novelty_from_hmm_evalue(evalue: float) -> float:
-    """Convert HMM evalue to novelty: weaker hit => higher novelty."""
-    ev = max(float(evalue), 1e-300)
-    strength = min(1.0, max(0.0, (-np.log10(ev)) / 200.0))  # very small evalue => strong/known
-    return 1.0 - strength
-
-
 def rank_missed_candidates(
     missed_ids: list[str],
     unlabeled_ids: list[str],
@@ -46,87 +40,86 @@ def rank_missed_candidates(
     hmm_best: pd.DataFrame,
     score_cfg: dict,
 ) -> pd.DataFrame:
-    """Score and rank missed candidates via affinity/novelty/local support."""
+    """Backward-compatible missed ranking entry (heuristic-only fallback)."""
     if len(missed_ids) == 0:
         return pd.DataFrame()
 
-    id_to_idx = {sid: i for i, sid in enumerate(unlabeled_ids)}
-    valid_ids = [mid for mid in missed_ids if mid in id_to_idx]
-    miss_idx = [id_to_idx[mid] for mid in valid_ids]
-    miss_emb = unlabeled_emb[miss_idx]
-
+    # Build pseudo positive labels from prototypes if needed.
     proto_ids = sorted(prototypes.keys())
-    proto_mat = np.vstack([prototypes[k] for k in proto_ids])
-    dmat = pairwise_distances(miss_emb, proto_mat, metric=score_cfg.get("distance_metric", "cosine"))
-    nearest_proto_idx = np.argmin(dmat, axis=1)
-    nearest_proto = [proto_ids[i] for i in nearest_proto_idx]
-    emb_dist = dmat[np.arange(len(miss_idx)), nearest_proto_idx]
-    emb_sim = np.exp(-emb_dist)
+    positive_ids = medoids_df["medoid_id"].tolist() if not medoids_df.empty else [f"cluster_{x}" for x in proto_ids]
+    positive_emb = np.vstack([prototypes[k] for k in proto_ids])
+    positive_labels = np.arange(len(proto_ids), dtype=int)
 
-    mm_map = mm_best.sort_values(["query_id", "bits"], ascending=[True, False]).drop_duplicates("query_id").set_index("query_id") if not mm_best.empty else pd.DataFrame()
-    hmm_map = hmm_best.set_index("candidate_id") if not hmm_best.empty else pd.DataFrame()
-
-    novelty = []
-    for cid in valid_ids:
-        mm_novel = 1.0
-        hmm_novel = 1.0
-
-        if not mm_best.empty and cid in mm_map.index:
-            mm_fident = float(mm_map.loc[cid, "fident"])
-            mm_qcov = float(mm_map.loc[cid, "qcov"])
-            mm_novel = max(0.0, 1.0 - 0.6 * mm_fident - 0.4 * mm_qcov)
-
-        if not hmm_best.empty and cid in hmm_map.index:
-            hmm_novel = _novelty_from_hmm_evalue(float(hmm_map.loc[cid, "hmm_best_evalue"]))
-
-        novelty.append(min(score_cfg.get("novelty_cap", 0.95), 0.5 * mm_novel + 0.5 * hmm_novel))
-
-    k = int(score_cfg["knn_k"])
-    nn = NearestNeighbors(n_neighbors=min(k + 1, len(miss_emb)), metric="cosine")
-    nn.fit(miss_emb)
-    dist, _ = nn.kneighbors(miss_emb)
-    mean_neighbor_dist = dist[:, 1:].mean(axis=1) if dist.shape[1] > 1 else np.ones(len(miss_emb))
-    local_support = np.exp(-mean_neighbor_dist)
-
-    medoid_map = medoids_df.set_index("cluster")["medoid_id"].to_dict()
-    df = pd.DataFrame(
-        {
-            "candidate_id": valid_ids,
-            "length": [lengths.get(cid, -1) for cid in valid_ids],
-            "nearest_positive_cluster": nearest_proto,
-            "nearest_positive_id": [medoid_map.get(c, "NA") for c in nearest_proto],
-            "embedding_distance": emb_dist,
-            "embedding_similarity": emb_sim,
-            "novelty_score": novelty,
-            "local_support_score": local_support,
-        }
+    feat_res = build_missed_candidate_features(
+        missed_ids=missed_ids,
+        unlabeled_ids=unlabeled_ids,
+        unlabeled_emb=unlabeled_emb,
+        positive_ids=positive_ids,
+        positive_emb=positive_emb,
+        positive_labels=positive_labels,
+        lengths=lengths,
+        medoids_df=medoids_df,
+        metadata_df=None,
+        mm_best=mm_best,
+        hmm_best=hmm_best,
+        cfg=score_cfg,
     )
+    return apply_heuristic_scorer(feat_res.features, score_cfg).scored
 
-    if not mm_best.empty:
-        mm_meta = mm_map.reset_index()[["query_id", "target_id", "fident", "alnlen", "qcov", "tcov", "evalue", "bits"]].rename(
-            columns={
-                "query_id": "candidate_id",
-                "target_id": "mmseqs_best_target",
-                "fident": "mmseqs_best_fident",
-                "alnlen": "mmseqs_best_alnlen",
-                "qcov": "mmseqs_best_qcov",
-                "tcov": "mmseqs_best_tcov",
-                "evalue": "mmseqs_best_evalue",
-                "bits": "mmseqs_best_bits",
-            }
-        )
-        df = df.merge(mm_meta, on="candidate_id", how="left")
 
-    if not hmm_best.empty:
-        df = df.merge(hmm_best, on="candidate_id", how="left")
+def rank_candidates_with_policy(
+    candidate_ids: list[str],
+    easy_ids: list[str],
+    missed_ids: list[str],
+    mm_best: pd.DataFrame,
+    hmm_best: pd.DataFrame,
+    mm_flags: pd.DataFrame,
+    hmm_flags: pd.DataFrame,
+    feature_result: FeatureBuildResult,
+    retrieval_cfg: dict[str, Any],
+    scorer_mode: str = "heuristic",
+    train_feature_df: pd.DataFrame | None = None,
+    train_labels: np.ndarray | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
+    """Rank easy + missed candidates with configurable scorer and merge policy."""
+    easy_df = build_easy_rank_table(candidate_ids, mm_best, hmm_best, mm_flags, hmm_flags)
 
-    w1 = score_cfg["w_affinity"]
-    w2 = score_cfg["w_novelty"]
-    w3 = score_cfg["w_local_support"]
-    df["final_score"] = w1 * df["embedding_similarity"] + w2 * df["novelty_score"] + w3 * df["local_support_score"]
-    df = df.sort_values("final_score", ascending=False).reset_index(drop=True)
-    df["rank"] = np.arange(1, len(df) + 1)
-    return df
+    if scorer_mode == "learned" and train_feature_df is not None and train_labels is not None:
+        try:
+            scored_res: ScoringResult = apply_learned_scorer(
+                feature_result.features,
+                train_feature_df,
+                train_labels,
+                retrieval_cfg,
+            )
+        except Exception:
+            scored_res = apply_heuristic_scorer(feature_result.features, retrieval_cfg)
+    else:
+        scored_res = apply_heuristic_scorer(feature_result.features, retrieval_cfg)
+
+    missed_df = scored_res.scored.copy()
+    fi = scored_res.feature_importance
+
+    policy = retrieval_cfg.get("easy_hit_policy", "prepend")
+    if policy == "merge":
+        # normalize score spaces before merge
+        e = easy_df.copy()
+        if len(e) > 0:
+            e["final_score"] = (e["easy_score"] - e["easy_score"].min()) / (e["easy_score"].max() - e["easy_score"].min() + 1e-9)
+            e["scoring_mode"] = "easy_strength"
+            e["confidence_tier"] = "high"
+            e["reason_for_high_rank"] = "strong_easy_hit"
+            e["dominant_signal_type"] = "mmseqs/hmm"
+            e["flags"] = ""
+        combined = pd.concat([e, missed_df], ignore_index=True, sort=False).sort_values("final_score", ascending=False)
+    else:
+        combined = pd.concat([easy_df, missed_df], ignore_index=True, sort=False)
+
+    combined = combined.drop_duplicates("candidate_id", keep="first").reset_index(drop=True)
+    combined["rank"] = np.arange(1, len(combined) + 1)
+    combined["experimental_priority_rank"] = combined["rank"]
+
+    return combined, feature_result.features, fi
 
 
 def export_top_candidates(
@@ -144,6 +137,8 @@ def export_top_candidates(
 
     by_cluster_dir = out_dir / "top_candidates_by_cluster"
     by_cluster_dir.mkdir(parents=True, exist_ok=True)
-    for cluster_id, sub in top.groupby("nearest_positive_cluster"):
-        recs = [SeqRecord(Seq(seqs[cid]), id=cid, description="") for cid in sub["candidate_id"] if cid in seqs]
-        write_fasta_records(recs, by_cluster_dir / f"cluster_{cluster_id}.fasta")
+    cluster_col = "nearest_positive_cluster" if "nearest_positive_cluster" in top.columns else None
+    if cluster_col:
+        for cluster_id, sub in top.groupby(cluster_col):
+            recs = [SeqRecord(Seq(seqs[cid]), id=cid, description="") for cid in sub["candidate_id"] if cid in seqs]
+            write_fasta_records(recs, by_cluster_dir / f"cluster_{cluster_id}.fasta")

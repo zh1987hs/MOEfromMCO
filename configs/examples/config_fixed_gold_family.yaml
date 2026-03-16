@@ -47,12 +47,23 @@ easy_hit:
     evalue_max: 1.0e-5
     bitscore_min: 50.0
 retrieval:
-  distance_metric: "cosine"
-  novelty_cap: 0.95
-  knn_k: 20
-  w_affinity: 0.60
-  w_novelty: 0.25
-  w_local_support: 0.15
+  scorer: "heuristic"
+  affinity_metric: "cosine"
+  easy_hit_policy: "prepend"
+  support_topk: 5
+  density_knn_k: 10
+  novelty_cap: 0.9
+  heuristic:
+    w_affinity: 0.75
+    w_positive_support: 0.15
+    w_local_density: 0.08
+    w_novelty: 0.02
+  learned:
+    enabled: true
+    model_type: "logistic"
+    negative_background_n: 5000
+    standardize_features: true
+    use_hard_negatives: true
   top_n_export: 200
 evaluation:
   mode: "leave_one_gold_family_out"
