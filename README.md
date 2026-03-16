@@ -95,3 +95,13 @@ python run_pipeline.py
 ```
 
 `config.yaml` 可直接改为 fixed+family-aware，或使用 `configs/examples/` 的示例。
+
+
+## 主流程排序语义（已接线）
+
+- 先做 `easy/missed` 分流。
+- `missed` 先构建特征，再按 `retrieval.scorer`（`heuristic` 或 `learned`）打分。
+- 再按 `retrieval.easy_hit_policy` 合并：
+  - `prepend`：easy 在前，missed 在后。
+  - `merge`：按统一分数融合。
+- `ranked_candidates_experimental_view.csv` 即最终实验优先级视图。

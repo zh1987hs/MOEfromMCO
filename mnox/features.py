@@ -80,6 +80,12 @@ def build_easy_rank_table(
 
     easy_df = base[base["easy"]].copy().sort_values("easy_score", ascending=False).reset_index(drop=True)
     easy_df["easy_or_missed"] = "easy"
+    easy_df["final_score"] = easy_df["easy_score"]
+    easy_df["scoring_mode"] = "easy_strength"
+    easy_df["confidence_tier"] = "high"
+    easy_df["dominant_signal_type"] = "mmseqs/hmm"
+    easy_df["reason_for_high_rank"] = "strong_easy_hit"
+    easy_df["flags"] = ""
     return easy_df
 
 

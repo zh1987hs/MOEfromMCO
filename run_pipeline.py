@@ -277,6 +277,53 @@ def main() -> None:
 
     # discovery stage defaults to heuristic unless explicitly requested
     scorer_mode = cfg["retrieval"].get("scorer", "heuristic")
+
+    train_feature_df = None
+    train_labels = None
+    if scorer_mode == "learned" and bool(cfg["retrieval"].get("learned", {}).get("enabled", True)):
+        try:
+            # fold-free discovery training: positives vs sampled background/hard-negatives
+            neg_n = min(int(cfg["retrieval"]["learned"].get("negative_background_n", 5000)), len(unl_ids_emb))
+            rng = np.random.default_rng(cfg["random_seed"])
+            neg_ids = rng.choice(unl_ids_emb, size=neg_n, replace=False).tolist()
+
+            pos_feat = build_missed_candidate_features(
+                missed_ids=pos_ids_emb,
+                unlabeled_ids=pos_ids_emb,
+                unlabeled_emb=pos_emb,
+                positive_ids=pos_ids_emb,
+                positive_emb=pos_emb,
+                positive_labels=labels,
+                lengths={**{r.id: len(r.seq) for r in pos_qc.kept_records}, **{r.id: len(r.seq) for r in unl_qc.kept_records}},
+                medoids_df=medoids_df,
+                metadata_df=metadata_df,
+                mm_best=mm_df,
+                hmm_best=hmm_best,
+                cfg=cfg["retrieval"],
+            ).features
+            neg_emb = np.vstack([unl_emb[unl_ids_emb.index(x)] for x in neg_ids])
+            neg_feat = build_missed_candidate_features(
+                missed_ids=neg_ids,
+                unlabeled_ids=neg_ids,
+                unlabeled_emb=neg_emb,
+                positive_ids=pos_ids_emb,
+                positive_emb=pos_emb,
+                positive_labels=labels,
+                lengths={**{r.id: len(r.seq) for r in pos_qc.kept_records}, **{r.id: len(r.seq) for r in unl_qc.kept_records}},
+                medoids_df=medoids_df,
+                metadata_df=metadata_df,
+                mm_best=mm_df,
+                hmm_best=hmm_best,
+                cfg=cfg["retrieval"],
+            ).features
+            train_feature_df = pd.concat([pos_feat, neg_feat], ignore_index=True, sort=False)
+            train_labels = np.array([1] * len(pos_feat) + [0] * len(neg_feat))
+            logger.info("Discovery learned scorer training enabled: n_pos=%d n_neg=%d", len(pos_feat), len(neg_feat))
+        except Exception as exc:
+            logger.warning("Discovery learned scorer training failed; fallback to heuristic. reason=%s", exc)
+            train_feature_df = None
+            train_labels = None
+
     ranked, feat_df, fi_df = rank_candidates_with_policy(
         candidate_ids=unl_ids_emb,
         easy_ids=easy_ids,
@@ -288,8 +335,8 @@ def main() -> None:
         feature_result=feat_res,
         retrieval_cfg=cfg["retrieval"],
         scorer_mode=scorer_mode,
-        train_feature_df=None,
-        train_labels=None,
+        train_feature_df=train_feature_df,
+        train_labels=train_labels,
     )
 
     ranked = ranked.merge(mm_flags, on="candidate_id", how="left")
@@ -355,6 +402,14 @@ def main() -> None:
             logger=logger,
         )
 
+    required_cv_cols = [
+        "evaluation_mode", "fold_gold_family", "leakage_guard", "method", "scoring_mode", "easy_hit_policy",
+        "mrr", "recall@10", "recall@20", "recall@50", "recall@100", "ef@10", "ef@20", "ef@50", "ef@100",
+        "n_easy", "n_missed", "n_train_pos", "n_holdout_pos",
+    ]
+    for c in required_cv_cols:
+        if c not in cv_df.columns:
+            cv_df[c] = np.nan
     cv_df.to_csv(run_dir / "cv_summary.csv", index=False)
     save_json(diag, run_dir / "cv_fold_diagnostics.json")
     with (run_dir / "cv_method_config_used.json").open("w", encoding="utf-8") as f:
