@@ -114,6 +114,9 @@ def build_missed_candidate_features(
 
     # Positive cluster prototypes from current fold/run embedding.
     p_df = pd.DataFrame({"positive_id": positive_ids, "cluster": positive_labels})
+    medoid_map: dict[int, str] = {}
+    if not medoids_df.empty and {"cluster", "medoid_id"}.issubset(set(medoids_df.columns)):
+        medoid_map = {int(r["cluster"]): str(r["medoid_id"]) for _, r in medoids_df.iterrows()}
     proto_ids = sorted(p_df["cluster"].unique().tolist())
     prototypes = []
     cluster_member_idx: dict[int, np.ndarray] = {}
@@ -158,7 +161,10 @@ def build_missed_candidate_features(
                 )
             )
 
-        comb = 0.60 * np.clip(topk_support, 0.0, 1.0) + 0.25 * medoid_support + 0.15 * proto_support
+        # Keep support as an independent "multi-anchor evidence" signal.
+        # Compared with pure prototype affinity, this emphasizes agreement among
+        # top-k real positives inside the nearest positive cluster.
+        comb = 0.70 * np.clip(topk_support, 0.0, 1.0) + 0.20 * medoid_support + 0.10 * proto_support
         pos_support.append(float(np.clip(comb, 0.0, 1.0)))
 
     # Local density in unlabeled space (auxiliary signal only).
@@ -283,8 +289,48 @@ def build_missed_candidate_features(
     feats["reason_for_high_rank"] = reasons
 
     # explicit risk diagnostics for experimental triage
-    generic_score = np.clip(0.7 * feats["local_density_score"] + 0.3 * (1.0 - feats["positive_support_score"]), 0.0, 1.0)
-    fp_risk = np.clip(0.5 * generic_score + 0.5 * (1.0 - feats["embedding_similarity"]), 0.0, 1.0)
+    mm_support = np.clip(
+        0.40 * feats.get("mmseqs_best_fident", pd.Series(dtype=float)).fillna(0.0)
+        + 0.20 * feats.get("mmseqs_best_qcov", pd.Series(dtype=float)).fillna(0.0)
+        + 0.20 * feats.get("mmseqs_best_tcov", pd.Series(dtype=float)).fillna(0.0)
+        + 0.20 * (feats.get("mmseqs_best_evalue", pd.Series(dtype=float)).fillna(1.0).map(_safe_loge) / 200.0),
+        0.0,
+        1.0,
+    )
+    hmm_support = np.clip(
+        0.55 * (feats.get("hmm_best_evalue", pd.Series(dtype=float)).fillna(1.0).map(_safe_loge) / 200.0)
+        + 0.45 * (feats.get("hmm_best_bitscore", pd.Series(dtype=float)).fillna(0.0) / 500.0),
+        0.0,
+        1.0,
+    )
+    generic_score = np.clip(
+        0.45 * feats["local_density_score"]
+        + 0.35 * (1.0 - feats["positive_support_score"])
+        + 0.20 * (1.0 - np.maximum(mm_support, hmm_support)),
+        0.0,
+        1.0,
+    )
+
+    novelty_mismatch = np.clip(feats["novelty_score"] - 0.5 * (feats["embedding_similarity"] + feats["positive_support_score"]), 0.0, 1.0)
+    fp_risk = np.clip(
+        0.40 * generic_score
+        + 0.25 * (1.0 - feats["positive_support_score"])
+        + 0.20 * novelty_mismatch
+        + 0.15 * (1.0 - feats["embedding_similarity"]),
+        0.0,
+        1.0,
+    )
+
+    # Align quantitative risk with existing textual flags.
+    has_generic_flag = feats["flags"].fillna("").str.contains("generic_mco_risk")
+    has_len_flag = feats["flags"].fillna("").str.contains("length_outlier")
+    has_close_flag = feats["flags"].fillna("").str.contains("too_close_to_easy_hit")
+    generic_score = np.clip(generic_score + 0.12 * has_generic_flag.astype(float), 0.0, 1.0)
+    fp_risk = np.clip(
+        fp_risk + 0.10 * has_generic_flag.astype(float) + 0.08 * has_len_flag.astype(float) + 0.06 * has_close_flag.astype(float),
+        0.0,
+        1.0,
+    )
     feats["generic_mco_risk_score"] = generic_score
     feats["false_positive_risk"] = fp_risk
 

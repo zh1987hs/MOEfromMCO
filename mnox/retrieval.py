@@ -129,9 +129,33 @@ def rank_candidates_with_policy(
     else:
         combined = pd.concat([easy_df, missed_df], ignore_index=True, sort=False)
 
+    for col, default in [
+        ("false_positive_risk", 0.0),
+        ("generic_mco_risk_score", 0.0),
+        ("embedding_similarity", np.nan),
+        ("positive_support_score", np.nan),
+        ("local_density_score", np.nan),
+        ("novelty_score", np.nan),
+    ]:
+        if col not in combined.columns:
+            combined[col] = default
+
     combined = combined.drop_duplicates("candidate_id", keep="first").reset_index(drop=True)
     combined["rank"] = np.arange(1, len(combined) + 1)
-    combined["experimental_priority_rank"] = combined["rank"]
+
+    # Experimental priority rank: score-aware but risk-penalized triage index.
+    if "final_score" in combined.columns:
+        exp_priority = combined["final_score"].fillna(0.0).astype(float)
+        if "false_positive_risk" in combined.columns:
+            exp_priority = exp_priority - 0.20 * combined["false_positive_risk"].fillna(0.0).astype(float)
+        if "generic_mco_risk_score" in combined.columns:
+            exp_priority = exp_priority - 0.10 * combined["generic_mco_risk_score"].fillna(0.0).astype(float)
+        combined["experimental_priority_score"] = exp_priority
+        combined["experimental_priority_rank"] = (
+            combined["experimental_priority_score"].rank(method="first", ascending=False).astype(int)
+        )
+    else:
+        combined["experimental_priority_rank"] = combined["rank"]
 
     return combined, missed_feature_df, fi
 

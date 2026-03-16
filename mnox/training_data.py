@@ -38,21 +38,19 @@ def build_learned_training_data(
     if len(positive_ids) == 0:
         return TrainingDataResult(pd.DataFrame(), np.array([], dtype=int), 0, 0)
 
-    # Positives: treat as query-like candidates against same positive anchor space.
-    pos_feat = build_missed_candidate_features(
-        missed_ids=positive_ids,
-        unlabeled_ids=positive_ids,
-        unlabeled_emb=positive_emb,
+    # Positives: leave-one-out query construction for better train/inference symmetry.
+    # This avoids trivially matching each positive to itself in support/nearest-anchor features.
+    pos_feat = _build_positive_training_features_leave_one_out(
         positive_ids=positive_ids,
         positive_emb=positive_emb,
         positive_labels=positive_labels,
-        lengths=lengths,
         medoids_df=medoids_df,
         metadata_df=metadata_df,
         mm_best=mm_best,
         hmm_best=hmm_best,
-        cfg=retrieval_cfg,
-    ).features
+        lengths=lengths,
+        retrieval_cfg=retrieval_cfg,
+    )
 
     if len(background_ids) == 0:
         feats = pos_feat.copy()
@@ -99,6 +97,65 @@ def build_learned_training_data(
     feats = pd.concat([pos_feat, neg_feat], ignore_index=True, sort=False)
     y = np.array([1] * len(pos_feat) + [0] * len(neg_feat), dtype=int)
     return TrainingDataResult(feats, y, len(pos_feat), len(neg_feat))
+
+
+def _build_positive_training_features_leave_one_out(
+    *,
+    positive_ids: list[str],
+    positive_emb: np.ndarray,
+    positive_labels: np.ndarray,
+    medoids_df: pd.DataFrame,
+    metadata_df: pd.DataFrame | None,
+    mm_best: pd.DataFrame,
+    hmm_best: pd.DataFrame,
+    lengths: dict[str, int],
+    retrieval_cfg: dict[str, Any],
+) -> pd.DataFrame:
+    """Build positive-class training features using leave-one-out anchors."""
+    if len(positive_ids) <= 1:
+        return build_missed_candidate_features(
+            missed_ids=positive_ids,
+            unlabeled_ids=positive_ids,
+            unlabeled_emb=positive_emb,
+            positive_ids=positive_ids,
+            positive_emb=positive_emb,
+            positive_labels=positive_labels,
+            lengths=lengths,
+            medoids_df=medoids_df,
+            metadata_df=metadata_df,
+            mm_best=mm_best,
+            hmm_best=hmm_best,
+            cfg=retrieval_cfg,
+        ).features
+
+    rows: list[pd.DataFrame] = []
+    for i, pid in enumerate(positive_ids):
+        keep_idx = [j for j in range(len(positive_ids)) if j != i]
+        if not keep_idx:
+            continue
+        medoids_sub = medoids_df
+        if not medoids_df.empty and {"medoid_id"}.issubset(set(medoids_df.columns)):
+            medoids_sub = medoids_df[medoids_df["medoid_id"] != pid].copy()
+
+        sub = build_missed_candidate_features(
+            missed_ids=[pid],
+            unlabeled_ids=[pid],
+            unlabeled_emb=positive_emb[i : i + 1],
+            positive_ids=[positive_ids[j] for j in keep_idx],
+            positive_emb=positive_emb[keep_idx],
+            positive_labels=positive_labels[keep_idx],
+            lengths=lengths,
+            medoids_df=medoids_sub,
+            metadata_df=metadata_df,
+            mm_best=mm_best,
+            hmm_best=hmm_best,
+            cfg=retrieval_cfg,
+        ).features
+        rows.append(sub)
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.concat(rows, ignore_index=True, sort=False)
 
 
 def _pairwise_cosine(a: np.ndarray, b: np.ndarray) -> np.ndarray:

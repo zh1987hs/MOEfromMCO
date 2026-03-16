@@ -29,6 +29,8 @@ FEATURE_COLUMNS = [
     "mmseqs_best_tcov",
     "mmseqs_best_bits",
     "hmm_best_bitscore",
+    "false_positive_risk",
+    "generic_mco_risk_score",
 ]
 
 
@@ -64,6 +66,11 @@ def apply_heuristic_scorer(df: pd.DataFrame, retrieval_cfg: dict[str, Any], vari
         + w_den * z["local_density_score"].fillna(0.0)
         + w_nov * z["novelty_score"].fillna(0.0)
     )
+    if "false_positive_risk" in z.columns:
+        z["final_score"] = z["final_score"] - 0.10 * z["false_positive_risk"].fillna(0.0)
+    if "generic_mco_risk_score" in z.columns:
+        z["final_score"] = z["final_score"] - 0.05 * z["generic_mco_risk_score"].fillna(0.0)
+    z["final_score"] = np.clip(z["final_score"], 0.0, 1.0)
     z = z.sort_values("final_score", ascending=False).reset_index(drop=True)
     z["rank"] = np.arange(1, len(z) + 1)
     z["scoring_mode"] = f"heuristic_{variant}"
@@ -103,6 +110,11 @@ def apply_learned_scorer(
         sw = np.where(train_labels == 1, 1.0 + 1.5 * np.clip(train_df["positive_support_score"].fillna(0.0).values, 0.0, 1.0), sw)
     if "local_density_score" in train_df.columns:
         sw = np.where(train_labels == 0, sw * (1.0 + 0.8 * np.clip(train_df["local_density_score"].fillna(0.0).values, 0.0, 1.0)), sw)
+    if "false_positive_risk" in train_df.columns:
+        # force model to focus on risk-heavy negatives and low-risk positives.
+        risk = np.clip(train_df["false_positive_risk"].fillna(0.0).values, 0.0, 1.0)
+        sw = np.where(train_labels == 0, sw * (1.0 + 0.8 * risk), sw)
+        sw = np.where(train_labels == 1, sw * (1.0 + 0.4 * (1.0 - risk)), sw)
 
     if isinstance(model, Pipeline):
         model.fit(x_train, train_labels, clf__sample_weight=sw)
@@ -113,7 +125,9 @@ def apply_learned_scorer(
     out = pred_df.copy()
     # keep novelty as small correction in learned mode too
     nov = out.get("novelty_score", pd.Series(np.zeros(len(out)))).fillna(0.0).values
-    out["final_score"] = np.clip(0.97 * proba + 0.03 * nov, 0.0, 1.0)
+    risk = out.get("false_positive_risk", pd.Series(np.zeros(len(out)))).fillna(0.0).values
+    gen_risk = out.get("generic_mco_risk_score", pd.Series(np.zeros(len(out)))).fillna(0.0).values
+    out["final_score"] = np.clip(0.94 * proba + 0.03 * nov + 0.03 * (1.0 - risk) - 0.03 * gen_risk, 0.0, 1.0)
     out = out.sort_values("final_score", ascending=False).reset_index(drop=True)
     out["rank"] = np.arange(1, len(out) + 1)
     out["scoring_mode"] = "learned_logistic"
