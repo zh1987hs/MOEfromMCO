@@ -85,6 +85,28 @@ def _resolve_config(cfg: dict) -> dict:
     r.setdefault("density_knn_k", r.get("knn_k", 20))
     r.setdefault("novelty_cap", 0.9)
     r.setdefault(
+        "risk",
+        {
+            "w_generic_density": 0.45,
+            "w_generic_low_support": 0.35,
+            "w_generic_weak_homology": 0.20,
+            "w_fp_generic": 0.40,
+            "w_fp_low_support": 0.25,
+            "w_fp_novelty_mismatch": 0.20,
+            "w_fp_low_affinity": 0.15,
+            "flag_generic_boost": 0.10,
+            "flag_length_boost": 0.08,
+            "flag_close_boost": 0.06,
+        },
+    )
+    r.setdefault(
+        "experimental_priority",
+        {
+            "w_false_positive_risk": 0.20,
+            "w_generic_mco_risk": 0.10,
+        },
+    )
+    r.setdefault(
         "heuristic",
         {
             "w_affinity": r.get("w_affinity", 0.75),

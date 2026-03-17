@@ -54,6 +54,8 @@ family-aware 模式下：
 - `retrieval.density_knn_k`
 - `retrieval.heuristic.*`
 - `retrieval.learned.*`
+- `retrieval.risk.*`：风险量化权重
+- `retrieval.experimental_priority.*`：实验优先级排名中的风险惩罚权重
 
 兼容性：旧字段 `w_affinity / w_novelty / w_local_support` 仍可读取。
 
@@ -117,14 +119,21 @@ python run_pipeline.py
 - `generic_mco_risk_score` 由 `local_density_score`、`(1-positive_support_score)` 以及 MMseqs/HMM 支持弱信号组合得到，并与 `generic_mco_risk` flag 对齐校正。
 - `false_positive_risk` 在 generic 风险基础上，再叠加 `novelty-support` 失配（novelty 虚高但 support/affinity 低）和弱 affinity 风险；同时受 `length_outlier/too_close_to_easy_hit` 等 flag 轻度增益。
 - 两者均为 0~1，数值越高风险越大。
+- 权重可通过 `retrieval.risk.*` 调整，默认参数偏保守（避免风险项反客为主）。
 
 `experimental_priority_rank` 不再简单复制 `rank`：
 - 先基于 `final_score`，再扣减 `false_positive_risk` 与 `generic_mco_risk_score`，用于实验优先级 triage。
+- 惩罚强度可通过 `retrieval.experimental_priority.*` 调整。
 
 ## Learned 分支使用建议（本轮收紧）
 
 - discovery 与 CV 的 learned 训练数据都通过同一个 `build_learned_training_data(...)` 构建。
 - 正样本训练特征采用 leave-one-out 方式构建，避免把自身当作锚点造成过于乐观的支持信号。
 - 默认仍推荐 `heuristic` 作为稳定主线；`learned` 作为可选增强，训练失败或样本不足时自动回退 heuristic。
+
+## 当前局限（诚实说明）
+
+- 风险量化仍是规则型可解释模型，不是监督风险校准器；建议与 `risk_flags`、邻近正样本信息联合判读。
+- learned 分支当前为轻量 logistic + 加权采样/加权训练，目标是提升 top-K 实验筛选实用性，不保证在所有数据上优于 heuristic。
 
 建议优先挑选：`high confidence_tier` 且 `positive_support_score` 高、`false_positive_risk` 低的候选。

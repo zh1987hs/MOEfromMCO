@@ -289,6 +289,18 @@ def build_missed_candidate_features(
     feats["reason_for_high_rank"] = reasons
 
     # explicit risk diagnostics for experimental triage
+    rcfg = cfg.get("risk", {})
+    w_generic_density = float(rcfg.get("w_generic_density", 0.45))
+    w_generic_low_support = float(rcfg.get("w_generic_low_support", 0.35))
+    w_generic_weak_homology = float(rcfg.get("w_generic_weak_homology", 0.20))
+    w_fp_generic = float(rcfg.get("w_fp_generic", 0.40))
+    w_fp_low_support = float(rcfg.get("w_fp_low_support", 0.25))
+    w_fp_novelty_mismatch = float(rcfg.get("w_fp_novelty_mismatch", 0.20))
+    w_fp_low_affinity = float(rcfg.get("w_fp_low_affinity", 0.15))
+    flag_generic_boost = float(rcfg.get("flag_generic_boost", 0.10))
+    flag_length_boost = float(rcfg.get("flag_length_boost", 0.08))
+    flag_close_boost = float(rcfg.get("flag_close_boost", 0.06))
+
     mm_support = np.clip(
         0.40 * feats.get("mmseqs_best_fident", pd.Series(dtype=float)).fillna(0.0)
         + 0.20 * feats.get("mmseqs_best_qcov", pd.Series(dtype=float)).fillna(0.0)
@@ -304,19 +316,19 @@ def build_missed_candidate_features(
         1.0,
     )
     generic_score = np.clip(
-        0.45 * feats["local_density_score"]
-        + 0.35 * (1.0 - feats["positive_support_score"])
-        + 0.20 * (1.0 - np.maximum(mm_support, hmm_support)),
+        w_generic_density * feats["local_density_score"]
+        + w_generic_low_support * (1.0 - feats["positive_support_score"])
+        + w_generic_weak_homology * (1.0 - np.maximum(mm_support, hmm_support)),
         0.0,
         1.0,
     )
 
     novelty_mismatch = np.clip(feats["novelty_score"] - 0.5 * (feats["embedding_similarity"] + feats["positive_support_score"]), 0.0, 1.0)
     fp_risk = np.clip(
-        0.40 * generic_score
-        + 0.25 * (1.0 - feats["positive_support_score"])
-        + 0.20 * novelty_mismatch
-        + 0.15 * (1.0 - feats["embedding_similarity"]),
+        w_fp_generic * generic_score
+        + w_fp_low_support * (1.0 - feats["positive_support_score"])
+        + w_fp_novelty_mismatch * novelty_mismatch
+        + w_fp_low_affinity * (1.0 - feats["embedding_similarity"]),
         0.0,
         1.0,
     )
@@ -325,9 +337,12 @@ def build_missed_candidate_features(
     has_generic_flag = feats["flags"].fillna("").str.contains("generic_mco_risk")
     has_len_flag = feats["flags"].fillna("").str.contains("length_outlier")
     has_close_flag = feats["flags"].fillna("").str.contains("too_close_to_easy_hit")
-    generic_score = np.clip(generic_score + 0.12 * has_generic_flag.astype(float), 0.0, 1.0)
+    generic_score = np.clip(generic_score + flag_generic_boost * has_generic_flag.astype(float), 0.0, 1.0)
     fp_risk = np.clip(
-        fp_risk + 0.10 * has_generic_flag.astype(float) + 0.08 * has_len_flag.astype(float) + 0.06 * has_close_flag.astype(float),
+        fp_risk
+        + flag_generic_boost * has_generic_flag.astype(float)
+        + flag_length_boost * has_len_flag.astype(float)
+        + flag_close_boost * has_close_flag.astype(float),
         0.0,
         1.0,
     )

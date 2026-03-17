@@ -144,12 +144,15 @@ def rank_candidates_with_policy(
     combined["rank"] = np.arange(1, len(combined) + 1)
 
     # Experimental priority rank: score-aware but risk-penalized triage index.
+    pcfg = retrieval_cfg.get("experimental_priority", {}) if isinstance(retrieval_cfg, dict) else {}
+    w_fp = float(pcfg.get("w_false_positive_risk", 0.20))
+    w_gr = float(pcfg.get("w_generic_mco_risk", 0.10))
     if "final_score" in combined.columns:
         exp_priority = combined["final_score"].fillna(0.0).astype(float)
         if "false_positive_risk" in combined.columns:
-            exp_priority = exp_priority - 0.20 * combined["false_positive_risk"].fillna(0.0).astype(float)
+            exp_priority = exp_priority - w_fp * combined["false_positive_risk"].fillna(0.0).astype(float)
         if "generic_mco_risk_score" in combined.columns:
-            exp_priority = exp_priority - 0.10 * combined["generic_mco_risk_score"].fillna(0.0).astype(float)
+            exp_priority = exp_priority - w_gr * combined["generic_mco_risk_score"].fillna(0.0).astype(float)
         combined["experimental_priority_score"] = exp_priority
         combined["experimental_priority_rank"] = (
             combined["experimental_priority_score"].rank(method="first", ascending=False).astype(int)
