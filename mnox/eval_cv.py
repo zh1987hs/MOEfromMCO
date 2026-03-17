@@ -249,8 +249,6 @@ def _run_fold_aligned(
     # learned (fold-local) with train positives vs sampled background
     learned_enabled = bool(cfg["retrieval"].get("learned", {}).get("enabled", True))
     if learned_enabled and len(feat_res.features) > 5 and len(train_ids) > 3:
-        from .scoring import apply_learned_scorer
-
         try:
             bg_emb = np.vstack([unlabeled_emb[unlabeled_ids.index(q)] for q in bg_ids]) if len(bg_ids) else np.empty((0, train_emb.shape[1]))
             t_res = build_learned_training_data(
@@ -267,9 +265,21 @@ def _run_fold_aligned(
                 background_ids=bg_ids,
                 background_emb=bg_emb,
             )
-            learned = apply_learned_scorer(feat_res.features, t_res.features, t_res.labels, cfg["retrieval"]).scored
-            rank_ids = ranked_h[ranked_h.get("easy_or_missed", "") == "easy"]["candidate_id"].tolist() + learned["candidate_id"].tolist()
-            rows.append({"method": "hybrid_learned", "scoring_mode": "learned", **_evaluate_rank(rank_ids, true_set, k_values)})
+            ranked_l, _, _ = rank_candidates_with_policy(
+                candidate_ids=query_ids,
+                easy_ids=easy_ids,
+                missed_ids=missed_ids,
+                mm_best=mm_df,
+                hmm_best=hmm_best,
+                mm_flags=mm_flags,
+                hmm_flags=hmm_flags,
+                feature_result=feat_res,
+                retrieval_cfg=cfg["retrieval"],
+                scorer_mode="learned",
+                train_feature_df=t_res.features,
+                train_labels=t_res.labels,
+            )
+            rows.append({"method": "hybrid_learned", "scoring_mode": "learned", **_evaluate_rank(ranked_l["candidate_id"].tolist(), true_set, k_values)})
         except Exception:
             pass
 

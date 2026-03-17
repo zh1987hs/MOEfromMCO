@@ -171,7 +171,12 @@ def export_top_candidates(
 ) -> None:
     """Export top candidates FASTA globally and by nearest cluster."""
     out_dir = Path(out_dir)
-    top = ranked_df.head(top_n)
+    if "experimental_priority_rank" in ranked_df.columns:
+        top = ranked_df.sort_values("experimental_priority_rank", ascending=True).head(top_n)
+    elif "rank" in ranked_df.columns:
+        top = ranked_df.sort_values("rank", ascending=True).head(top_n)
+    else:
+        top = ranked_df.sort_values("final_score", ascending=False).head(top_n)
 
     records = [SeqRecord(Seq(seqs[cid]), id=cid, description="") for cid in top["candidate_id"] if cid in seqs]
     write_fasta_records(records, out_dir / "top_candidates.fasta")

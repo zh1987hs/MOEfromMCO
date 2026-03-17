@@ -374,6 +374,8 @@ def main() -> None:
     ]
     exp_view = ranked[[c for c in experimental_cols if c in ranked.columns]].copy()
     exp_view = exp_view.rename(columns={"dominant_signal_type": "main_supporting_signals", "flags": "risk_flags"})
+    if "experimental_priority_rank" in exp_view.columns:
+        exp_view = exp_view.sort_values("experimental_priority_rank", ascending=True).reset_index(drop=True)
     exp_view.to_csv(run_dir / "ranked_candidates_experimental_view.csv", index=False)
 
     if fi_df is not None and not fi_df.empty:

@@ -107,6 +107,7 @@ python run_pipeline.py
   - `prepend`：easy 在前，missed 在后。
   - `merge`：按统一分数融合。
 - `ranked_candidates_experimental_view.csv` 即最终实验优先级视图。
+- 实验筛选默认优先参考 `experimental_priority_rank`（风险惩罚后的优先级），而不是仅看裸 `rank/final_score`。
 
 
 ## Experimental view 字段补充
@@ -128,6 +129,7 @@ python run_pipeline.py
 ## Learned 分支使用建议（本轮收紧）
 
 - discovery 与 CV 的 learned 训练数据都通过同一个 `build_learned_training_data(...)` 构建。
+- CV 的 learned 最终排序也走与 discovery 一致的 `rank_candidates_with_policy(...)` merge 语义（`prepend/merge` 两种 policy 一致处理）。
 - 正样本训练特征采用 leave-one-out 方式构建，避免把自身当作锚点造成过于乐观的支持信号。
 - 默认仍推荐 `heuristic` 作为稳定主线；`learned` 作为可选增强，训练失败或样本不足时自动回退 heuristic。
 
