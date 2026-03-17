@@ -86,6 +86,8 @@ retrieval:
   experimental_priority:
     w_false_positive_risk: 0.20
     w_generic_mco_risk: 0.10
+    easy_hit_bonus: 0.03
+    high_confidence_bonus: 0.02
 
   # legacy fields (still read)
   distance_metric: "cosine"

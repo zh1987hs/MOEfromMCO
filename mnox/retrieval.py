@@ -147,12 +147,24 @@ def rank_candidates_with_policy(
     pcfg = retrieval_cfg.get("experimental_priority", {}) if isinstance(retrieval_cfg, dict) else {}
     w_fp = float(pcfg.get("w_false_positive_risk", 0.20))
     w_gr = float(pcfg.get("w_generic_mco_risk", 0.10))
+    easy_bonus = float(pcfg.get("easy_hit_bonus", 0.03))
+    high_conf_bonus = float(pcfg.get("high_confidence_bonus", 0.02))
     if "final_score" in combined.columns:
         exp_priority = combined["final_score"].fillna(0.0).astype(float)
         if "false_positive_risk" in combined.columns:
             exp_priority = exp_priority - w_fp * combined["false_positive_risk"].fillna(0.0).astype(float)
         if "generic_mco_risk_score" in combined.columns:
             exp_priority = exp_priority - w_gr * combined["generic_mco_risk_score"].fillna(0.0).astype(float)
+        if "easy_or_missed" in combined.columns:
+            exp_priority = exp_priority + easy_bonus * combined["easy_or_missed"].fillna("").eq("easy").astype(float)
+        if "confidence_tier" in combined.columns:
+            exp_priority = exp_priority + high_conf_bonus * combined["confidence_tier"].fillna("").eq("high").astype(float)
+        exp_priority = pd.Series(exp_priority, index=combined.index)
+        pmin, pmax = float(exp_priority.min()), float(exp_priority.max())
+        if pmax - pmin > 1e-12:
+            exp_priority = (exp_priority - pmin) / (pmax - pmin)
+        else:
+            exp_priority = pd.Series(np.clip(exp_priority, 0.0, 1.0), index=combined.index)
         combined["experimental_priority_score"] = exp_priority
         combined["experimental_priority_rank"] = (
             combined["experimental_priority_score"].rank(method="first", ascending=False).astype(int)
@@ -180,6 +192,7 @@ def export_top_candidates(
 
     records = [SeqRecord(Seq(seqs[cid]), id=cid, description="") for cid in top["candidate_id"] if cid in seqs]
     write_fasta_records(records, out_dir / "top_candidates.fasta")
+    top.to_csv(out_dir / "top_candidates_experimental.csv", index=False)
 
     by_cluster_dir = out_dir / "top_candidates_by_cluster"
     by_cluster_dir.mkdir(parents=True, exist_ok=True)

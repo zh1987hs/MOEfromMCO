@@ -104,6 +104,8 @@ def _resolve_config(cfg: dict) -> dict:
         {
             "w_false_positive_risk": 0.20,
             "w_generic_mco_risk": 0.10,
+            "easy_hit_bonus": 0.03,
+            "high_confidence_bonus": 0.02,
         },
     )
     r.setdefault(
@@ -354,6 +356,7 @@ def main() -> None:
     experimental_cols = [
         "candidate_id",
         "final_score",
+        "experimental_priority_score",
         "rank",
         "experimental_priority_rank",
         "easy_or_missed",

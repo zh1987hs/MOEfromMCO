@@ -109,6 +109,10 @@ python run_pipeline.py
 - `ranked_candidates_experimental_view.csv` 即最终实验优先级视图。
 - 实验筛选默认优先参考 `experimental_priority_rank`（风险惩罚后的优先级），而不是仅看裸 `rank/final_score`。
 
+说明：
+- `final_score` / `rank`：模型层综合排序（检索/打分结果）。
+- `experimental_priority_score` / `experimental_priority_rank`：实验筛选层优先级（在 `final_score` 基础上做风险惩罚与轻量实验友好校正）。
+
 
 ## Experimental view 字段补充
 
@@ -125,6 +129,10 @@ python run_pipeline.py
 `experimental_priority_rank` 不再简单复制 `rank`：
 - 先基于 `final_score`，再扣减 `false_positive_risk` 与 `generic_mco_risk_score`，用于实验优先级 triage。
 - 惩罚强度可通过 `retrieval.experimental_priority.*` 调整。
+- 默认还会对 `easy` 命中和 `high confidence_tier` 给出轻量 bonus（可配置），随后归一化得到 `experimental_priority_score`。
+
+Top 导出行为：
+- `top_candidates_experimental.csv` 与 `top_candidates.fasta` 都按 `experimental_priority_rank` 前 N 导出（不再按 DataFrame 原顺序）。
 
 ## Learned 分支使用建议（本轮收紧）
 
