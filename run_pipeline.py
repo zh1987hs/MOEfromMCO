@@ -41,6 +41,57 @@ from mnox.utils import (
 )
 
 
+def _coerce_bool_series(s: pd.Series) -> pd.Series:
+    """Coerce mixed-type flag series to boolean safely."""
+    if s.dtype == bool:
+        return s.fillna(False)
+    if pd.api.types.is_numeric_dtype(s):
+        return s.fillna(0).astype(float).ne(0)
+    t = s.fillna("").astype(str).str.strip().str.lower()
+    return t.isin({"1", "true", "t", "yes", "y"})
+
+
+def _normalize_easy_hit_flags(
+    ranked: pd.DataFrame,
+    mm_flags: pd.DataFrame,
+    hmm_flags: pd.DataFrame,
+) -> pd.DataFrame:
+    """Normalize easy-hit flags to canonical bool columns without _x/_y leakage.
+
+    Handles cases where ranked already has canonical columns, only suffixed columns,
+    or no flag columns at all.
+    """
+
+    out = ranked.copy()
+    for src, base_col in [
+        (mm_flags, "mmseqs_easy_hit_flag"),
+        (hmm_flags, "hmm_easy_hit_flag"),
+    ]:
+        related = [c for c in out.columns if c == base_col or c.startswith(f"{base_col}_")]
+
+        # Merge only when no related column exists yet.
+        if not related and base_col in src.columns:
+            out = out.merge(src[["candidate_id", base_col]], on="candidate_id", how="left")
+            related = [c for c in out.columns if c == base_col or c.startswith(f"{base_col}_")]
+
+        if not related:
+            out[base_col] = False
+            continue
+
+        combined = pd.Series(False, index=out.index)
+        for c in related:
+            combined = combined | _coerce_bool_series(out[c])
+
+        out[base_col] = combined.fillna(False).astype(bool)
+
+        # Drop non-canonical suffix variants to avoid downstream confusion.
+        drop_cols = [c for c in related if c != base_col]
+        if drop_cols:
+            out = out.drop(columns=drop_cols)
+
+    return out
+
+
 def _resolve_config(cfg: dict) -> dict:
     """Backwards-compatible config normalization."""
     if "positives" not in cfg:
@@ -345,10 +396,7 @@ def main() -> None:
         train_labels=train_labels,
     )
 
-    ranked = ranked.merge(mm_flags, on="candidate_id", how="left")
-    ranked = ranked.merge(hmm_flags, on="candidate_id", how="left")
-    ranked["mmseqs_easy_hit_flag"] = ranked["mmseqs_easy_hit_flag"].fillna(False).astype(bool)
-    ranked["hmm_easy_hit_flag"] = ranked["hmm_easy_hit_flag"].fillna(False).astype(bool)
+    ranked = _normalize_easy_hit_flags(ranked, mm_flags, hmm_flags)
 
     write_dataframe(ranked, run_dir / "ranked_candidates", logger)
     feat_df.to_csv(run_dir / "ranked_candidates_features.csv", index=False)
