@@ -22,7 +22,7 @@ from mnox.mmseqs import make_easy_hit_flags, run_mmseqs_search
 from mnox.plots import plot_cv_metrics
 from mnox.qc import dedupe_and_filter, qc_summary_dict, save_duplicate_map
 from mnox.retrieval import (
-    build_easy_and_missed_sets,
+    decide_easy_hits,
     export_top_candidates,
     rank_candidates_with_policy,
 )
@@ -143,6 +143,46 @@ def _resolve_config(cfg: dict) -> dict:
     if "cv" not in cfg:
         cfg["cv"] = {"background_n": 5000, "k_values": [10, 20, 50, 100]}
 
+    if "easy_hit" not in cfg:
+        cfg["easy_hit"] = {}
+    e = cfg["easy_hit"]
+    e.setdefault("decision_rule", "consensus")
+    e.setdefault("profile", "balanced")
+    e.setdefault("max_easy_fraction", 0.30)
+    e.setdefault("fallback_if_too_many_easy", "tighten")
+    e.setdefault("calibrate", True)
+    e.setdefault("calibration_objective", "precision_at_easy")
+    e.setdefault("target_easy_precision", 0.95)
+    e.setdefault("target_easy_fraction_max", e.get("max_easy_fraction", 0.30))
+    e.setdefault("negative_source", "background")
+    mm_old = e.get("mmseqs", {})
+    if not {"loose", "balanced", "strict"}.issubset(mm_old.keys()):
+        mm_base = {
+            "fident_min": mm_old.get("fident_min", 0.30),
+            "qcov_min": mm_old.get("qcov_min", 0.70),
+            "tcov_min": mm_old.get("tcov_min", mm_old.get("qcov_min", 0.70)),
+            "evalue_max": mm_old.get("evalue_max", 1e-5),
+        }
+        e["mmseqs"] = {
+            "loose": dict(mm_base),
+            "balanced": {"fident_min": 0.35, "qcov_min": 0.80, "tcov_min": 0.80, "evalue_max": 1e-10},
+            "strict": {"fident_min": 0.40, "qcov_min": 0.80, "tcov_min": 0.80, "evalue_max": 1e-20},
+        }
+    hmm_old = e.get("hmm", {})
+    if not {"loose", "balanced", "strict"}.issubset(hmm_old.keys()):
+        base_eval = hmm_old.get("evalue_max", 1e-5)
+        base_bits = hmm_old.get("bitscore_min", 50.0)
+        base_cov = hmm_old.get("hmm_cov_min", 0.35)
+        e["hmm"] = {
+            "use_curated_cutoffs_if_present": True,
+            "loose": {"full_seq_evalue_max": base_eval, "bitscore_min": base_bits, "hmm_cov_min": base_cov},
+            "balanced": {"full_seq_evalue_max": 1e-10, "bitscore_min": 80.0, "hmm_cov_min": 0.35},
+            "strict": {"full_seq_evalue_max": 1e-15, "bitscore_min": 100.0, "hmm_cov_min": 0.50},
+        }
+    e["mmseqs"]["profile"] = e.get("profile", "balanced")
+    e["hmm"]["profile"] = e.get("profile", "balanced")
+    e["hmm"].setdefault("use_curated_cutoffs_if_present", True)
+
     if "retrieval" not in cfg:
         cfg["retrieval"] = {}
     r = cfg["retrieval"]
@@ -201,6 +241,49 @@ def _resolve_config(cfg: dict) -> dict:
         },
     )
     return cfg
+
+
+def _easy_overlap_summary(
+    easy_df: pd.DataFrame,
+    metadata_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Summarize easy-hit overlap globally and by inferred family."""
+    out_rows: list[dict[str, object]] = []
+    if easy_df.empty:
+        return pd.DataFrame(columns=["group", "group_value", "total_candidates", "easy_count", "easy_fraction"])
+
+    target_family = {}
+    if {"positive_id", "gold_family"}.issubset(metadata_df.columns):
+        target_family = dict(zip(metadata_df["positive_id"], metadata_df["gold_family"]))
+
+    work = easy_df.copy()
+    work["support_family"] = work.get("mmseqs_best_target", pd.Series(index=work.index)).map(target_family).fillna("unknown")
+    out_rows.append(
+        {
+            "group": "global",
+            "group_value": "all",
+            "total_candidates": int(len(work)),
+            "easy_count": int(work["easy_hit_flag"].sum()),
+            "easy_fraction": float(work["easy_hit_flag"].mean()) if len(work) else 0.0,
+            "mmseqs_only_easy": int((work["easy_confidence_class"] == "mmseqs_strict_only").sum()),
+            "hmm_only_easy": int((work["easy_confidence_class"] == "hmm_strict_only").sum()),
+            "both_easy": int((work["easy_confidence_class"] == "both_support").sum()),
+        }
+    )
+    for fam, sub in work.groupby("support_family"):
+        out_rows.append(
+            {
+                "group": "family",
+                "group_value": fam,
+                "total_candidates": int(len(sub)),
+                "easy_count": int(sub["easy_hit_flag"].sum()),
+                "easy_fraction": float(sub["easy_hit_flag"].mean()) if len(sub) else 0.0,
+                "mmseqs_only_easy": int((sub["easy_confidence_class"] == "mmseqs_strict_only").sum()),
+                "hmm_only_easy": int((sub["easy_confidence_class"] == "hmm_strict_only").sum()),
+                "both_easy": int((sub["easy_confidence_class"] == "both_support").sum()),
+            }
+        )
+    return pd.DataFrame(out_rows)
 
 
 def _load_positive_metadata(path: str | None, kept_positive_ids: list[str]) -> pd.DataFrame:
@@ -357,9 +440,50 @@ def main() -> None:
     hmm_flags.to_csv(run_dir / "hmm_easy_hit_flags.csv", index=False)
 
     # Step 6 easy/missed split
-    easy_ids, missed_ids = build_easy_and_missed_sets(unl_ids_emb, mm_flags, hmm_flags)
+    easy_detail_df, easy_diag = decide_easy_hits(unl_ids_emb, mm_flags, hmm_flags, cfg["easy_hit"])
+    easy_ids = easy_detail_df.loc[easy_detail_df["easy_hit_flag"], "candidate_id"].tolist()
+    missed_ids = easy_detail_df.loc[~easy_detail_df["easy_hit_flag"], "candidate_id"].tolist()
     write_lines(easy_ids, run_dir / "easy_ids.txt")
     write_lines(missed_ids, run_dir / "missed_ids.txt")
+    save_json(
+        {
+            **easy_diag,
+            "single_tool_easy_strength_mean": {
+                "mmseqs_strict_only": float(
+                    easy_detail_df.loc[easy_detail_df["easy_confidence_class"] == "mmseqs_strict_only", "easy_strength_score"].mean()
+                )
+                if pd.notna(easy_detail_df.loc[easy_detail_df["easy_confidence_class"] == "mmseqs_strict_only", "easy_strength_score"].mean())
+                else 0.0,
+                "hmm_strict_only": float(
+                    easy_detail_df.loc[easy_detail_df["easy_confidence_class"] == "hmm_strict_only", "easy_strength_score"].mean()
+                )
+                if pd.notna(easy_detail_df.loc[easy_detail_df["easy_confidence_class"] == "hmm_strict_only", "easy_strength_score"].mean())
+                else 0.0,
+                "both_support": float(
+                    easy_detail_df.loc[easy_detail_df["easy_confidence_class"] == "both_support", "easy_strength_score"].mean()
+                )
+                if pd.notna(easy_detail_df.loc[easy_detail_df["easy_confidence_class"] == "both_support", "easy_strength_score"].mean())
+                else 0.0,
+            },
+        },
+        run_dir / "easy_hit_diagnostics.json",
+    )
+    _easy_overlap_summary(easy_detail_df, metadata_df).to_csv(run_dir / "easy_hit_overlap_summary.csv", index=False)
+    used_profile = str(easy_diag.get("profile_used", cfg["easy_hit"]["profile"]))
+    save_json(
+        {
+            "decision_rule": cfg["easy_hit"]["decision_rule"],
+            "profile_requested": cfg["easy_hit"]["profile"],
+            "profile_used": used_profile,
+            "max_easy_fraction": cfg["easy_hit"]["max_easy_fraction"],
+            "fallback_if_too_many_easy": cfg["easy_hit"]["fallback_if_too_many_easy"],
+            "mmseqs_thresholds": cfg["easy_hit"]["mmseqs"].get(used_profile, {}),
+            "mmseqs_strict_thresholds": cfg["easy_hit"]["mmseqs"].get("strict", {}),
+            "hmm_thresholds": cfg["easy_hit"]["hmm"].get(used_profile, {}),
+            "hmm_strict_thresholds": cfg["easy_hit"]["hmm"].get("strict", {}),
+        },
+        run_dir / "easy_hit_thresholds_used.json",
+    )
 
     # Step 7 features + scoring + final merge
     lengths = {r.id: len(r.seq) for r in unl_qc.kept_records}
@@ -424,6 +548,31 @@ def main() -> None:
     )
 
     ranked = _normalize_easy_hit_flags(ranked, mm_flags, hmm_flags)
+    ranked = ranked.merge(
+        easy_detail_df[
+            [
+                "candidate_id",
+                "easy_hit_flag",
+                "easy_confidence_class",
+                "easy_reason",
+                "easy_strength_score",
+                "mmseqs_easy_hit_flag",
+                "hmm_easy_hit_flag",
+            ]
+        ],
+        on="candidate_id",
+        how="left",
+        suffixes=("", "_easy"),
+    )
+    if "mmseqs_easy_hit_flag_easy" in ranked.columns:
+        ranked["mmseqs_easy_hit_flag"] = ranked["mmseqs_easy_hit_flag"] | ranked["mmseqs_easy_hit_flag_easy"].fillna(False).astype(bool)
+        ranked = ranked.drop(columns=["mmseqs_easy_hit_flag_easy"])
+    if "hmm_easy_hit_flag_easy" in ranked.columns:
+        ranked["hmm_easy_hit_flag"] = ranked["hmm_easy_hit_flag"] | ranked["hmm_easy_hit_flag_easy"].fillna(False).astype(bool)
+        ranked = ranked.drop(columns=["hmm_easy_hit_flag_easy"])
+    ranked["easy_confidence_class"] = ranked["easy_confidence_class"].fillna("not_easy")
+    ranked["easy_reason"] = ranked["easy_reason"].fillna("")
+    ranked["easy_strength_score"] = pd.to_numeric(ranked["easy_strength_score"], errors="coerce").fillna(0.0)
     _validate_split_rank_outputs(ranked)
 
     write_dataframe(ranked, run_dir / "ranked_candidates", logger)
@@ -458,6 +607,9 @@ def main() -> None:
         "is_top_in_merged",
         "why_hidden_by_easy",
         "easy_rank",
+        "easy_confidence_class",
+        "easy_reason",
+        "easy_strength_score",
         "easy_or_missed",
         "scoring_mode",
         "nearest_positive_id",

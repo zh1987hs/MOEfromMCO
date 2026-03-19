@@ -5,6 +5,7 @@ import json
 import logging
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .utils import ensure_dir, run_command
@@ -98,14 +99,53 @@ def parse_mmseqs_tsv(tsv_path: str | Path, top_n: int = 1) -> pd.DataFrame:
     return df.groupby("query_id", as_index=False).head(top_n).reset_index(drop=True)
 
 
+def _profile_thresholds(cfg: dict) -> dict[str, dict]:
+    """Return loose/balanced/strict thresholds with backward-compatible fallback."""
+    if {"loose", "balanced", "strict"}.issubset(cfg.keys()):
+        return {k: cfg[k] for k in ["loose", "balanced", "strict"]}
+    base = {
+        "fident_min": cfg.get("fident_min", 0.30),
+        "qcov_min": cfg.get("qcov_min", 0.70),
+        "tcov_min": cfg.get("tcov_min", cfg.get("qcov_min", 0.70)),
+        "evalue_max": cfg.get("evalue_max", 1e-5),
+    }
+    return {"loose": dict(base), "balanced": dict(base), "strict": dict(base)}
+
+
+def _strength_from_best(best: pd.DataFrame, thr: dict) -> pd.Series:
+    fident = (best["fident"] / max(float(thr.get("fident_min", 1e-9)), 1e-9)).clip(0.0, 2.0) / 2.0
+    qcov = (best["qcov"] / max(float(thr.get("qcov_min", 1e-9)), 1e-9)).clip(0.0, 2.0) / 2.0
+    tcov = (best["tcov"] / max(float(thr.get("tcov_min", 1e-9)), 1e-9)).clip(0.0, 2.0) / 2.0
+    elog = best["evalue"].clip(lower=1e-300).map(lambda x: -np.log10(x))
+    eth = max(-np.log10(float(thr.get("evalue_max", 1e-300))), 1e-9)
+    escore = (elog / eth).clip(0.0, 2.0) / 2.0
+    return (0.30 * fident + 0.25 * qcov + 0.25 * tcov + 0.20 * escore).clip(0.0, 1.0)
+
+
 def make_easy_hit_flags(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """Create easy-hit flag dataframe from MMseqs hit table."""
     if df.empty:
         return pd.DataFrame(columns=["candidate_id", "mmseqs_easy_hit_flag"])
 
     best = df.sort_values(["query_id", "bits"], ascending=[True, False]).groupby("query_id", as_index=False).first()
-    flag = (
-        ((best["fident"] >= cfg["fident_min"]) & (best["qcov"] >= cfg["qcov_min"]))
-        | (best["evalue"] <= cfg["evalue_max"])
-    )
-    return pd.DataFrame({"candidate_id": best["query_id"], "mmseqs_easy_hit_flag": flag.astype(bool)})
+    prof = _profile_thresholds(cfg)
+    out = pd.DataFrame({"candidate_id": best["query_id"]})
+    for name, thr in prof.items():
+        flag = (
+            (best["fident"] >= float(thr.get("fident_min", 0.0)))
+            & (best["qcov"] >= float(thr.get("qcov_min", 0.0)))
+            & (best["tcov"] >= float(thr.get("tcov_min", thr.get("qcov_min", 0.0))))
+            & (best["evalue"] <= float(thr.get("evalue_max", 1.0)))
+        )
+        out[f"mmseqs_hit_{name}"] = flag.astype(bool)
+        out[f"mmseqs_strength_{name}"] = _strength_from_best(best, thr)
+
+    profile = cfg.get("profile", "balanced")
+    out["mmseqs_easy_hit_flag"] = out.get(f"mmseqs_hit_{profile}", out["mmseqs_hit_balanced"]).astype(bool)
+    out["mmseqs_best_target"] = best["target_id"].values
+    out["mmseqs_best_fident"] = best["fident"].values
+    out["mmseqs_best_qcov"] = best["qcov"].values
+    out["mmseqs_best_tcov"] = best["tcov"].values
+    out["mmseqs_best_evalue"] = best["evalue"].values
+    out["mmseqs_best_bits"] = best["bits"].values
+    return out

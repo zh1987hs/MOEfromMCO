@@ -55,13 +55,45 @@ hmmer:
   evalue: 1.0e-3
 
 easy_hit:
+  decision_rule: "consensus"   # or | and | consensus | calibrated
+  profile: "balanced"          # loose | balanced | strict
+  max_easy_fraction: 0.30
+  fallback_if_too_many_easy: "tighten"   # tighten | demote_to_missed | warn_only
+  calibrate: true
+  calibration_objective: "precision_at_easy"
+  target_easy_precision: 0.95
+  target_easy_fraction_max: 0.30
+  negative_source: "background"
   mmseqs:
-    fident_min: 0.30
-    qcov_min: 0.70
-    evalue_max: 1.0e-5
+    loose:
+      fident_min: 0.30
+      qcov_min: 0.70
+      tcov_min: 0.70
+      evalue_max: 1.0e-5
+    balanced:
+      fident_min: 0.35
+      qcov_min: 0.80
+      tcov_min: 0.80
+      evalue_max: 1.0e-10
+    strict:
+      fident_min: 0.40
+      qcov_min: 0.80
+      tcov_min: 0.80
+      evalue_max: 1.0e-20
   hmm:
-    evalue_max: 1.0e-5
-    bitscore_min: 50.0
+    use_curated_cutoffs_if_present: true
+    loose:
+      full_seq_evalue_max: 1.0e-5
+      bitscore_min: 50.0
+      hmm_cov_min: 0.35
+    balanced:
+      full_seq_evalue_max: 1.0e-10
+      bitscore_min: 80.0
+      hmm_cov_min: 0.35
+    strict:
+      full_seq_evalue_max: 1.0e-15
+      bitscore_min: 100.0
+      hmm_cov_min: 0.50
 
 retrieval:
   scorer: "heuristic"              # heuristic | learned

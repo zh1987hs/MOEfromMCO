@@ -14,7 +14,7 @@ from .features import build_missed_candidate_features
 from .hmmer import build_cluster_hmms, make_hmm_easy_flags, run_hmmsearch_for_clusters
 from .io_fasta import write_fasta_records
 from .mmseqs import make_easy_hit_flags, run_mmseqs_search
-from .retrieval import build_easy_and_missed_sets, rank_candidates_with_policy
+from .retrieval import decide_easy_hits, rank_candidates_with_policy
 from .scoring import apply_heuristic_scorer
 from .training_data import build_learned_training_data
 from .utils import ensure_dir
@@ -187,7 +187,9 @@ def _run_fold_aligned(
         logger,
     )
 
-    easy_ids, missed_ids = build_easy_and_missed_sets(query_ids, mm_flags, hmm_flags)
+    easy_detail_df, _ = decide_easy_hits(query_ids, mm_flags, hmm_flags, cfg["easy_hit"])
+    easy_ids = easy_detail_df.loc[easy_detail_df["easy_hit_flag"], "candidate_id"].tolist()
+    missed_ids = easy_detail_df.loc[~easy_detail_df["easy_hit_flag"], "candidate_id"].tolist()
 
     # fold prototypes/medoids from train only
     train_idx = [positive_ids.index(x) for x in train_ids]

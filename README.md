@@ -50,6 +50,10 @@ family-aware 模式下：
 
 - `retrieval.scorer`: `heuristic | learned`（默认建议 `heuristic` 作为稳定主线，`learned` 作为可选增强）
 - `retrieval.easy_hit_policy`: `prepend | merge | interleave | prepend_with_cap`
+- `easy_hit.decision_rule`: `or | and | consensus | calibrated`
+- `easy_hit.profile`: `loose | balanced | strict`
+- `easy_hit.max_easy_fraction`: easy 膨胀上限（推荐 0.30）
+- `easy_hit.fallback_if_too_many_easy`: `tighten | demote_to_missed | warn_only`
 - `retrieval.support_topk`
 - `retrieval.density_knn_k`
 - `retrieval.experimental_view_mode`: `merged | missed_only | split_outputs`
@@ -92,6 +96,16 @@ family-aware 模式下：
 - `ranked_candidates_easy_only.csv`：只看 easy hits，便于单独复核传统近同源命中。
 - `ranked_candidates_experimental_view.csv` 可按配置输出 merged 或 missed-only 视角。
 
+### easy-hit 的推荐理解
+
+- easy 代表**高置信近邻集合**，不应等于“泛 MCO 同源集合”。
+- 在 MCO-only 搜索空间中，`or + 宽阈值` 往往会让 easy_fraction 接近 1，这通常说明 easy 判定过宽，而不是 discovery 能力更强。
+- 当前推荐默认值：
+  - `decision_rule = consensus`
+  - `profile = balanced`
+  - `max_easy_fraction = 0.30`
+- 当 easy_fraction 仍明显过高时，建议优先查看 `easy_hit_diagnostics.json`、`easy_hit_overlap_summary.csv` 和 missed-only 排名输出。
+
 ## 实验筛选建议
 
 - discovery 阶段可使用 gold+silver 增强召回。
@@ -123,6 +137,7 @@ python run_pipeline.py
 - `ranked_candidates_experimental_view.csv` 即最终实验优先级视图。
 - 实验筛选默认优先参考 `experimental_priority_rank`（风险惩罚后的优先级），而不是仅看裸 `rank/final_score`。
 - 当 easy 数量非常大时，建议直接查看 `ranked_candidates_missed_only.csv` 或将 `retrieval.experimental_view_mode` 设为 `missed_only`。
+- easy 的默认判定不再是“任一工具命中即 easy”，而是 `consensus + balanced`：双工具支持优先，单工具命中只有在 strict 阈值下才进入 easy。
 
 说明：
 - `final_score` / `rank`：模型层综合排序（检索/打分结果）。
@@ -138,6 +153,9 @@ python run_pipeline.py
 - `rank_shift_due_to_easy`：由于 easy 占位导致的名次后移量
 - `is_top_in_missed` / `is_top_in_merged`：是否进入各自视角的 top-N
 - `why_hidden_by_easy`：当某候选在 missed 里很靠前但在 merged 里被 easy 遮蔽时给出原因说明
+- `easy_confidence_class`：`both_support | mmseqs_strict_only | hmm_strict_only`
+- `easy_reason`：easy 判定来源与使用的 rule/profile
+- `easy_strength_score`：easy 证据强度摘要
 
 实现说明（已落地到特征构建）：
 - `generic_mco_risk_score` 由 `local_density_score`、`(1-positive_support_score)` 以及 MMseqs/HMM 支持弱信号组合得到，并与 `generic_mco_risk` flag 对齐校正。
@@ -158,6 +176,11 @@ CV / 消融输出：
   - `overall_merged`
   - `missed_only`
 - `missed_only` 指标只在 missed 子集内部计算，更适合回答“新的远同源候选是否被排到前面”。
+
+easy-hit 诊断输出：
+- `easy_hit_diagnostics.json`：记录 easy/missed 总量、easy_fraction、单工具/双工具 easy 计数、是否超过上限等。
+- `easy_hit_overlap_summary.csv`：记录全局及按推断 family 的 easy_fraction 摘要。
+- `easy_hit_thresholds_used.json`：记录最终实际使用的 easy 阈值与 profile，便于复现。
 
 ## Learned 分支使用建议（本轮收紧）
 

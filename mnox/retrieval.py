@@ -13,6 +13,22 @@ from .io_fasta import write_fasta_records
 from .scoring import ScoringResult, apply_heuristic_scorer, apply_learned_scorer
 
 
+def _series_bool(df: pd.DataFrame, col: str, default: bool = False) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(default, index=df.index, dtype=bool)
+    return df[col].fillna(default).astype(bool)
+
+
+def _series_float(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(default, index=df.index, dtype=float)
+    return pd.to_numeric(df[col], errors="coerce").fillna(default).astype(float)
+
+
+def _profile_name(easy_cfg: dict[str, Any]) -> str:
+    return str(easy_cfg.get("profile", "balanced")).lower()
+
+
 def _normalize_easy_scores(easy_df: pd.DataFrame) -> pd.DataFrame:
     """Map easy-hit strength onto a 0..1 score range for merged policies."""
     e = easy_df.copy()
@@ -120,6 +136,110 @@ def build_easy_and_missed_sets(
     easy_ids = flags.loc[flags["easy"], "candidate_id"].tolist()
     missed_ids = flags.loc[~flags["easy"], "candidate_id"].tolist()
     return easy_ids, missed_ids
+
+
+def decide_easy_hits(
+    candidate_ids: list[str],
+    mm_flags: pd.DataFrame,
+    hmm_flags: pd.DataFrame,
+    easy_cfg: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Decide easy hits with rule/profile/fraction guard while preserving legacy mode."""
+    base = pd.DataFrame({"candidate_id": candidate_ids})
+    base = base.merge(mm_flags, on="candidate_id", how="left")
+    base = base.merge(hmm_flags, on="candidate_id", how="left")
+
+    profile = _profile_name(easy_cfg)
+    rule = str(easy_cfg.get("decision_rule", "or")).lower()
+    max_easy_fraction = float(easy_cfg.get("max_easy_fraction", 1.0))
+    fallback = str(easy_cfg.get("fallback_if_too_many_easy", "warn_only")).lower()
+    calibrate = bool(easy_cfg.get("calibrate", False)) or rule == "calibrated"
+    ordered_profiles = ["loose", "balanced", "strict"]
+
+    def apply_rule(profile_name: str) -> pd.Series:
+        mm_prof = _series_bool(base, f"mmseqs_hit_{profile_name}", False)
+        hmm_prof = _series_bool(base, f"hmm_hit_{profile_name}", False)
+        mm_strict = _series_bool(base, "mmseqs_hit_strict", False)
+        hmm_strict = _series_bool(base, "hmm_hit_strict", False)
+        if rule == "and":
+            return mm_prof & hmm_prof
+        if rule in {"consensus", "calibrated"}:
+            return (mm_prof & hmm_prof) | (mm_strict & ~hmm_prof) | (hmm_strict & ~mm_prof)
+        return mm_prof | hmm_prof
+
+    candidate_profiles = ordered_profiles[ordered_profiles.index(profile):] if profile in ordered_profiles else [profile]
+    selected_profile = profile if profile in ordered_profiles else "balanced"
+    easy = apply_rule(selected_profile)
+
+    if calibrate or easy.mean() > max_easy_fraction:
+        for prof in candidate_profiles:
+            trial = apply_rule(prof)
+            if trial.mean() <= float(easy_cfg.get("target_easy_fraction_max", max_easy_fraction)):
+                selected_profile = prof
+                easy = trial
+                break
+        else:
+            if fallback == "tighten":
+                selected_profile = "strict"
+                easy = apply_rule("strict")
+
+    if easy.mean() > max_easy_fraction and fallback == "demote_to_missed":
+        strength = np.maximum(
+            _series_float(base, f"mmseqs_strength_{selected_profile}", 0.0),
+            _series_float(base, f"hmm_strength_{selected_profile}", 0.0),
+        )
+        keep_n = int(np.floor(max_easy_fraction * len(base)))
+        keep_n = max(0, min(keep_n, int(easy.sum())))
+        if keep_n < int(easy.sum()):
+            keep_ids = base.loc[easy].assign(_strength=strength[easy].values).sort_values("_strength", ascending=False).head(keep_n)["candidate_id"]
+            easy = base["candidate_id"].isin(keep_ids)
+
+    mm_prof = _series_bool(base, f"mmseqs_hit_{selected_profile}", False)
+    hmm_prof = _series_bool(base, f"hmm_hit_{selected_profile}", False)
+    mm_strict = _series_bool(base, "mmseqs_hit_strict", False)
+    hmm_strict = _series_bool(base, "hmm_hit_strict", False)
+
+    base["mmseqs_easy_hit_flag"] = mm_prof
+    base["hmm_easy_hit_flag"] = hmm_prof
+    base["easy_hit_flag"] = easy.astype(bool)
+    base["easy_confidence_class"] = np.select(
+        [mm_prof & hmm_prof, mm_strict & ~hmm_prof, hmm_strict & ~mm_prof],
+        ["both_support", "mmseqs_strict_only", "hmm_strict_only"],
+        default="not_easy",
+    )
+    base["easy_reason"] = np.select(
+        [mm_prof & hmm_prof, mm_strict & ~hmm_prof, hmm_strict & ~mm_prof],
+        [
+            f"{rule}:{selected_profile}:both",
+            f"{rule}:strict:mmseqs_only",
+            f"{rule}:strict:hmm_only",
+        ],
+        default=f"{rule}:{selected_profile}:missed",
+    )
+    base["easy_strength_score"] = np.maximum(
+        _series_float(base, f"mmseqs_strength_{selected_profile}", 0.0),
+        _series_float(base, f"hmm_strength_{selected_profile}", 0.0),
+    )
+
+    both_easy = int((easy & mm_prof & hmm_prof).sum())
+    mm_only_easy = int((easy & mm_strict & ~hmm_prof).sum())
+    hmm_only_easy = int((easy & hmm_strict & ~mm_prof).sum())
+    diagnostics = {
+        "decision_rule": rule,
+        "profile_requested": profile,
+        "profile_used": selected_profile,
+        "total_candidates": int(len(base)),
+        "easy_count": int(easy.sum()),
+        "missed_count": int((~easy).sum()),
+        "easy_fraction": float(easy.mean()) if len(base) else 0.0,
+        "mmseqs_only_easy": mm_only_easy,
+        "hmm_only_easy": hmm_only_easy,
+        "both_easy": both_easy,
+        "exceeds_max_easy_fraction": bool((float(easy.mean()) if len(base) else 0.0) > max_easy_fraction),
+        "fallback_if_too_many_easy": fallback,
+        "calibrate": calibrate,
+    }
+    return base, diagnostics
 
 
 def rank_missed_candidates(
