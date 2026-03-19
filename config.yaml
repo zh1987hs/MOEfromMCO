@@ -66,7 +66,12 @@ easy_hit:
 retrieval:
   scorer: "heuristic"              # heuristic | learned
   affinity_metric: "cosine"
-  easy_hit_policy: "prepend"       # prepend | merge
+  easy_hit_policy: "prepend"       # prepend | merge | interleave | prepend_with_cap
+  experimental_view_mode: "merged" # merged | missed_only | split_outputs
+  cv_view_mode: "both"             # merged | missed_only | both
+  export_easy_only: true
+  export_missed_only: true
+  easy_prepend_cap: 200
   support_topk: 5
   density_knn_k: 10
   novelty_cap: 0.90

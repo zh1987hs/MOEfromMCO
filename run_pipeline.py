@@ -92,6 +92,23 @@ def _normalize_easy_hit_flags(
     return out
 
 
+def _validate_split_rank_outputs(ranked: pd.DataFrame) -> None:
+    """Lightweight runtime sanity checks for merged + missed-only ranking outputs."""
+    if ranked.empty or "easy_or_missed" not in ranked.columns:
+        return
+    missed = ranked[ranked["easy_or_missed"].eq("missed")].copy()
+    if missed.empty:
+        return
+    if "missed_rank" not in missed.columns or "missed_experimental_priority_rank" not in missed.columns:
+        raise RuntimeError("Missing missed-only ranking columns in ranked output.")
+    mr = missed["missed_rank"].dropna().astype(int)
+    mepr = missed["missed_experimental_priority_rank"].dropna().astype(int)
+    if len(mr) and (mr.min() != 1 or mr.nunique() != len(mr)):
+        raise RuntimeError("missed_rank sanity check failed: expected unique contiguous missed-only ranks.")
+    if len(mepr) and (mepr.min() != 1 or mepr.nunique() != len(mepr)):
+        raise RuntimeError("missed_experimental_priority_rank sanity check failed.")
+
+
 def _resolve_config(cfg: dict) -> dict:
     """Backwards-compatible config normalization."""
     if "positives" not in cfg:
@@ -132,6 +149,11 @@ def _resolve_config(cfg: dict) -> dict:
     r.setdefault("scorer", "heuristic")
     r.setdefault("affinity_metric", r.get("distance_metric", "cosine"))
     r.setdefault("easy_hit_policy", "prepend")
+    r.setdefault("experimental_view_mode", "merged")
+    r.setdefault("cv_view_mode", "both")
+    r.setdefault("export_easy_only", True)
+    r.setdefault("export_missed_only", True)
+    r.setdefault("easy_prepend_cap", r.get("top_n_export", 200))
     r.setdefault("support_topk", 5)
     r.setdefault("density_knn_k", r.get("knn_k", 20))
     r.setdefault("novelty_cap", 0.9)
@@ -223,6 +245,11 @@ def main() -> None:
         cfg["evaluation"].get("leakage_guard", True),
     )
     logger.info("retrieval.scorer=%s easy_hit_policy=%s", cfg["retrieval"]["scorer"], cfg["retrieval"]["easy_hit_policy"])
+    logger.info(
+        "retrieval.experimental_view_mode=%s cv_view_mode=%s",
+        cfg["retrieval"]["experimental_view_mode"],
+        cfg["retrieval"]["cv_view_mode"],
+    )
 
     check_python_dependencies()
     check_external_tools(cfg["hmmer"]["msa_tool"])
@@ -397,9 +424,26 @@ def main() -> None:
     )
 
     ranked = _normalize_easy_hit_flags(ranked, mm_flags, hmm_flags)
+    _validate_split_rank_outputs(ranked)
 
     write_dataframe(ranked, run_dir / "ranked_candidates", logger)
     feat_df.to_csv(run_dir / "ranked_candidates_features.csv", index=False)
+
+    if bool(cfg["retrieval"].get("export_missed_only", True)):
+        missed_mask = ranked["easy_or_missed"].eq("missed") if "easy_or_missed" in ranked.columns else pd.Series(False, index=ranked.index)
+        missed_only = ranked[missed_mask].copy()
+        if "missed_experimental_priority_rank" in missed_only.columns:
+            missed_only = missed_only.sort_values("missed_experimental_priority_rank", ascending=True)
+        elif "missed_rank" in missed_only.columns:
+            missed_only = missed_only.sort_values("missed_rank", ascending=True)
+        missed_only.to_csv(run_dir / "ranked_candidates_missed_only.csv", index=False)
+
+    if bool(cfg["retrieval"].get("export_easy_only", True)):
+        easy_mask = ranked["easy_or_missed"].eq("easy") if "easy_or_missed" in ranked.columns else pd.Series(False, index=ranked.index)
+        easy_only = ranked[easy_mask].copy()
+        if "easy_rank" in easy_only.columns:
+            easy_only = easy_only.sort_values("easy_rank", ascending=True)
+        easy_only.to_csv(run_dir / "ranked_candidates_easy_only.csv", index=False)
 
     experimental_cols = [
         "candidate_id",
@@ -407,6 +451,13 @@ def main() -> None:
         "experimental_priority_score",
         "rank",
         "experimental_priority_rank",
+        "missed_rank",
+        "missed_experimental_priority_rank",
+        "rank_shift_due_to_easy",
+        "is_top_in_missed",
+        "is_top_in_merged",
+        "why_hidden_by_easy",
+        "easy_rank",
         "easy_or_missed",
         "scoring_mode",
         "nearest_positive_id",
@@ -425,8 +476,15 @@ def main() -> None:
     ]
     exp_view = ranked[[c for c in experimental_cols if c in ranked.columns]].copy()
     exp_view = exp_view.rename(columns={"dominant_signal_type": "main_supporting_signals", "flags": "risk_flags"})
-    if "experimental_priority_rank" in exp_view.columns:
-        exp_view = exp_view.sort_values("experimental_priority_rank", ascending=True).reset_index(drop=True)
+    experimental_view_mode = cfg["retrieval"].get("experimental_view_mode", "merged")
+    if experimental_view_mode == "missed_only":
+        exp_missed_mask = exp_view["easy_or_missed"].eq("missed") if "easy_or_missed" in exp_view.columns else pd.Series(False, index=exp_view.index)
+        exp_view = exp_view[exp_missed_mask].copy()
+        if "missed_experimental_priority_rank" in exp_view.columns:
+            exp_view = exp_view.sort_values("missed_experimental_priority_rank", ascending=True).reset_index(drop=True)
+    else:
+        if "experimental_priority_rank" in exp_view.columns:
+            exp_view = exp_view.sort_values("experimental_priority_rank", ascending=True).reset_index(drop=True)
     exp_view.to_csv(run_dir / "ranked_candidates_experimental_view.csv", index=False)
 
     if fi_df is not None and not fi_df.empty:
@@ -466,8 +524,16 @@ def main() -> None:
             logger=logger,
         )
 
+    cv_view_mode = cfg["retrieval"].get("cv_view_mode", "both")
+    if cv_view_mode == "merged":
+        eval_view = cv_df["evaluation_view"] if "evaluation_view" in cv_df.columns else pd.Series("overall_merged", index=cv_df.index)
+        cv_df = cv_df[eval_view == "overall_merged"].copy()
+    elif cv_view_mode == "missed_only":
+        eval_view = cv_df["evaluation_view"] if "evaluation_view" in cv_df.columns else pd.Series("", index=cv_df.index)
+        cv_df = cv_df[eval_view == "missed_only"].copy()
+
     required_cv_cols = [
-        "evaluation_mode", "fold_gold_family", "leakage_guard", "method", "scoring_mode", "easy_hit_policy",
+        "evaluation_mode", "evaluation_view", "fold_gold_family", "leakage_guard", "method", "scoring_mode", "easy_hit_policy",
         "mrr", "recall@10", "recall@20", "recall@50", "recall@100", "ef@10", "ef@20", "ef@50", "ef@100",
         "n_easy", "n_missed", "n_train_pos", "n_holdout_pos",
     ]
@@ -489,7 +555,9 @@ def main() -> None:
         )
 
     # simple ablation summary
-    ablation = cv_df.groupby(["method", "scoring_mode"], as_index=False)[[c for c in cv_df.columns if c.startswith("recall@") or c.startswith("ef@") or c == "mrr"]].mean(numeric_only=True)
+    ablation = cv_df.groupby(
+        ["evaluation_view", "method", "scoring_mode"], as_index=False
+    )[[c for c in cv_df.columns if c.startswith("recall@") or c.startswith("ef@") or c == "mrr"]].mean(numeric_only=True)
     ablation.to_csv(run_dir / "ablation_summary.csv", index=False)
 
     plot_cv_metrics(cv_df, run_dir / "plots")

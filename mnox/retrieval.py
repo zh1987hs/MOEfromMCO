@@ -13,6 +13,99 @@ from .io_fasta import write_fasta_records
 from .scoring import ScoringResult, apply_heuristic_scorer, apply_learned_scorer
 
 
+def _normalize_easy_scores(easy_df: pd.DataFrame) -> pd.DataFrame:
+    """Map easy-hit strength onto a 0..1 score range for merged policies."""
+    e = easy_df.copy()
+    if len(e) == 0:
+        return e
+    denom = e["easy_score"].max() - e["easy_score"].min() + 1e-9
+    e["final_score"] = (e["easy_score"] - e["easy_score"].min()) / denom
+    e["scoring_mode"] = "easy_strength"
+    e["confidence_tier"] = "high"
+    e["reason_for_high_rank"] = "strong_easy_hit"
+    e["dominant_signal_type"] = "mmseqs/hmm"
+    e["flags"] = ""
+    return e
+
+
+def _merge_easy_and_missed(easy_df: pd.DataFrame, missed_df: pd.DataFrame, retrieval_cfg: dict[str, Any]) -> pd.DataFrame:
+    """Merge easy and missed tables using configured policy."""
+    policy = retrieval_cfg.get("easy_hit_policy", "prepend")
+    if policy == "merge":
+        e = _normalize_easy_scores(easy_df)
+        return pd.concat([e, missed_df], ignore_index=True, sort=False).sort_values("final_score", ascending=False)
+
+    if policy == "interleave":
+        e = _normalize_easy_scores(easy_df).reset_index(drop=True)
+        m = missed_df.copy().reset_index(drop=True)
+        rows: list[pd.Series] = []
+        max_len = max(len(e), len(m))
+        for i in range(max_len):
+            if i < len(e):
+                rows.append(e.iloc[i])
+            if i < len(m):
+                rows.append(m.iloc[i])
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=pd.Index([]))
+
+    if policy == "prepend_with_cap":
+        cap = int(retrieval_cfg.get("easy_prepend_cap", retrieval_cfg.get("top_n_export", 200)))
+        e = easy_df.copy()
+        head = e.head(cap)
+        tail = e.iloc[cap:]
+        return pd.concat([head, missed_df, tail], ignore_index=True, sort=False)
+
+    return pd.concat([easy_df, missed_df], ignore_index=True, sort=False)
+
+
+def _add_split_view_columns(combined: pd.DataFrame, easy_df: pd.DataFrame, missed_df: pd.DataFrame, retrieval_cfg: dict[str, Any]) -> pd.DataFrame:
+    """Add missed/easy-local ranks and experimental triage diagnostics."""
+    out = combined.copy()
+
+    easy_rank_map: dict[str, int] = {}
+    if not easy_df.empty:
+        e = easy_df.copy().reset_index(drop=True)
+        e["easy_rank"] = np.arange(1, len(e) + 1)
+        easy_rank_map = dict(zip(e["candidate_id"], e["easy_rank"]))
+
+    missed_rank_map: dict[str, int] = {}
+    missed_exp_map: dict[str, int] = {}
+    if not missed_df.empty:
+        m = missed_df.copy().reset_index(drop=True)
+        m["missed_rank"] = np.arange(1, len(m) + 1)
+        if "experimental_priority_score" in m.columns:
+            m["missed_experimental_priority_rank"] = (
+                m["experimental_priority_score"].rank(method="first", ascending=False).astype(int)
+            )
+        else:
+            m["missed_experimental_priority_rank"] = m["missed_rank"]
+        missed_rank_map = dict(zip(m["candidate_id"], m["missed_rank"]))
+        missed_exp_map = dict(zip(m["candidate_id"], m["missed_experimental_priority_rank"]))
+
+    out["easy_rank"] = out["candidate_id"].map(easy_rank_map)
+    out["missed_rank"] = out["candidate_id"].map(missed_rank_map)
+    out["missed_experimental_priority_rank"] = out["candidate_id"].map(missed_exp_map)
+    easy_or_missed = out["easy_or_missed"] if "easy_or_missed" in out.columns else pd.Series("", index=out.index)
+
+    out["rank_shift_due_to_easy"] = np.where(
+        easy_or_missed.eq("missed"),
+        out["experimental_priority_rank"].fillna(out["rank"]) - out["missed_experimental_priority_rank"].fillna(np.nan),
+        0,
+    )
+    top_k = int(retrieval_cfg.get("top_n_export", 200))
+    out["is_top_in_missed"] = out["missed_experimental_priority_rank"].fillna(np.inf).le(top_k)
+    out["is_top_in_merged"] = out["experimental_priority_rank"].fillna(np.inf).le(top_k)
+    out["why_hidden_by_easy"] = np.where(
+        easy_or_missed.eq("missed") & out["is_top_in_missed"] & ~out["is_top_in_merged"],
+        (
+            "top_missed_but_hidden_by_easy:"
+            + out["rank_shift_due_to_easy"].fillna(0).astype(int).astype(str)
+            + "_positions"
+        ),
+        "",
+    )
+    return out
+
+
 def build_easy_and_missed_sets(
     candidate_ids: list[str], mm_flags: pd.DataFrame, hmm_flags: pd.DataFrame
 ) -> tuple[list[str], list[str]]:
@@ -114,20 +207,7 @@ def rank_candidates_with_policy(
         missed_df["easy_or_missed"] = "missed"
         fi = scored_res.feature_importance
 
-    policy = retrieval_cfg.get("easy_hit_policy", "prepend")
-    if policy == "merge":
-        # normalize score spaces before merge
-        e = easy_df.copy()
-        if len(e) > 0:
-            e["final_score"] = (e["easy_score"] - e["easy_score"].min()) / (e["easy_score"].max() - e["easy_score"].min() + 1e-9)
-            e["scoring_mode"] = "easy_strength"
-            e["confidence_tier"] = "high"
-            e["reason_for_high_rank"] = "strong_easy_hit"
-            e["dominant_signal_type"] = "mmseqs/hmm"
-            e["flags"] = ""
-        combined = pd.concat([e, missed_df], ignore_index=True, sort=False).sort_values("final_score", ascending=False)
-    else:
-        combined = pd.concat([easy_df, missed_df], ignore_index=True, sort=False)
+    combined = _merge_easy_and_missed(easy_df, missed_df, retrieval_cfg)
 
     for col, default in [
         ("false_positive_risk", 0.0),
@@ -170,8 +250,10 @@ def rank_candidates_with_policy(
             combined["experimental_priority_score"].rank(method="first", ascending=False).astype(int)
         )
     else:
+        combined["experimental_priority_score"] = np.nan
         combined["experimental_priority_rank"] = combined["rank"]
 
+    combined = _add_split_view_columns(combined, easy_df, missed_df, retrieval_cfg)
     return combined, missed_feature_df, fi
 
 

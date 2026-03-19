@@ -115,6 +115,43 @@ def _evaluate_rank(
     return row
 
 
+def _evaluate_views_from_rank_ids(
+    rank_ids: list[str],
+    true_set: set[str],
+    missed_ids: set[str],
+    k_values: list[int],
+) -> list[dict[str, Any]]:
+    """Return overall and missed-only metrics for a ranking."""
+    rows: list[dict[str, Any]] = []
+    rows.append({"evaluation_view": "overall_merged", **_evaluate_rank(rank_ids, true_set, k_values)})
+
+    missed_rank_ids = [rid for rid in rank_ids if rid in missed_ids]
+    true_missed = true_set & missed_ids
+    if len(true_missed) == 0:
+        row = {"mrr": np.nan}
+        for k in k_values:
+            row[f"recall@{k}"] = np.nan
+            row[f"ef@{k}"] = np.nan
+        rows.append({"evaluation_view": "missed_only", **row})
+    else:
+        rows.append({"evaluation_view": "missed_only", **_evaluate_rank(missed_rank_ids, true_missed, k_values)})
+    return rows
+
+
+def _append_method_rows(
+    rows: list[dict[str, Any]],
+    method: str,
+    scoring_mode: str,
+    rank_ids: list[str],
+    true_set: set[str],
+    missed_ids: set[str],
+    k_values: list[int],
+) -> None:
+    """Append evaluation rows for configured views."""
+    for met in _evaluate_views_from_rank_ids(rank_ids, true_set, missed_ids, k_values):
+        rows.append({"method": method, "scoring_mode": scoring_mode, **met})
+
+
 def _run_fold_aligned(
     fold_name: str,
     train_ids: list[str],
@@ -197,13 +234,14 @@ def _run_fold_aligned(
     d = pairwise_distances(q_emb, train_emb.mean(axis=0, keepdims=True), metric="cosine").reshape(-1)
     emb_rank = [x for _, x in sorted(zip(d, query_ids), key=lambda t: t[0])]
 
+    missed_id_set = set(missed_ids)
+
     for method, rids in [
         ("mmseqs_only", mm_rank),
         ("hmmer_only", hm_rank),
         ("embedding_only", emb_rank),
     ]:
-        met = _evaluate_rank(rids, true_set, k_values)
-        rows.append({"method": method, "scoring_mode": method, **met})
+        _append_method_rows(rows, method, method, rids, true_set, missed_id_set, k_values)
 
     # aligned hybrid
     ranked_h, _, _ = rank_candidates_with_policy(
@@ -218,7 +256,7 @@ def _run_fold_aligned(
         retrieval_cfg=cfg["retrieval"],
         scorer_mode="heuristic",
     )
-    rows.append({"method": "hybrid_heuristic", "scoring_mode": "heuristic", **_evaluate_rank(ranked_h["candidate_id"].tolist(), true_set, k_values)})
+    _append_method_rows(rows, "hybrid_heuristic", "heuristic", ranked_h["candidate_id"].tolist(), true_set, missed_id_set, k_values)
 
     # ablations
     for variant, mname in [("no_novelty", "hybrid_no_novelty"), ("no_support", "hybrid_no_support")]:
@@ -226,7 +264,7 @@ def _run_fold_aligned(
         # keep easy prepend behavior
         easy_rank = ranked_h[ranked_h.get("easy_or_missed", "") == "easy"]["candidate_id"].tolist() if "easy_or_missed" in ranked_h else []
         rank_ids = easy_rank + scored["candidate_id"].tolist()
-        rows.append({"method": mname, "scoring_mode": f"heuristic_{variant}", **_evaluate_rank(rank_ids, true_set, k_values)})
+        _append_method_rows(rows, mname, f"heuristic_{variant}", rank_ids, true_set, missed_id_set, k_values)
 
     # no easy split
     all_feat = build_missed_candidate_features(
@@ -244,7 +282,7 @@ def _run_fold_aligned(
         cfg=cfg["retrieval"],
     ).features
     no_easy = apply_heuristic_scorer(all_feat, cfg["retrieval"]).scored
-    rows.append({"method": "hybrid_no_easy_split", "scoring_mode": "heuristic", **_evaluate_rank(no_easy["candidate_id"].tolist(), true_set, k_values)})
+    _append_method_rows(rows, "hybrid_no_easy_split", "heuristic", no_easy["candidate_id"].tolist(), true_set, missed_id_set, k_values)
 
     # learned (fold-local) with train positives vs sampled background
     learned_enabled = bool(cfg["retrieval"].get("learned", {}).get("enabled", True))
@@ -279,7 +317,7 @@ def _run_fold_aligned(
                 train_feature_df=t_res.features,
                 train_labels=t_res.labels,
             )
-            rows.append({"method": "hybrid_learned", "scoring_mode": "learned", **_evaluate_rank(ranked_l["candidate_id"].tolist(), true_set, k_values)})
+            _append_method_rows(rows, "hybrid_learned", "learned", ranked_l["candidate_id"].tolist(), true_set, missed_id_set, k_values)
         except Exception:
             pass
 

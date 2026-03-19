@@ -49,9 +49,12 @@ family-aware 模式下：
 见 `config.yaml`：
 
 - `retrieval.scorer`: `heuristic | learned`（默认建议 `heuristic` 作为稳定主线，`learned` 作为可选增强）
-- `retrieval.easy_hit_policy`: `prepend | merge`
+- `retrieval.easy_hit_policy`: `prepend | merge | interleave | prepend_with_cap`
 - `retrieval.support_topk`
 - `retrieval.density_knn_k`
+- `retrieval.experimental_view_mode`: `merged | missed_only | split_outputs`
+- `retrieval.cv_view_mode`: `merged | missed_only | both`
+- `retrieval.export_easy_only / export_missed_only`
 - `retrieval.heuristic.*`
 - `retrieval.learned.*`
 - `retrieval.risk.*`：风险量化权重
@@ -75,10 +78,19 @@ family-aware 模式下：
 
 - `ranked_candidates_features.csv`
 - `ranked_candidates_experimental_view.csv`
+- `ranked_candidates_missed_only.csv`
+- `ranked_candidates_easy_only.csv`
 - `cv_fold_diagnostics.json`
 - `cv_method_config_used.json`
 - `feature_importance.csv`（learned scorer可用时）
 - `ablation_summary.csv`
+
+### merged 总榜 vs missed-only 视图
+
+- `ranked_candidates.*` / `rank`：保持与当前流程兼容的 merged 总榜。
+- `ranked_candidates_missed_only.csv`：只看 missed 候选，避免 easy-hit 大量占位时把真正新候选压到几万名以后。
+- `ranked_candidates_easy_only.csv`：只看 easy hits，便于单独复核传统近同源命中。
+- `ranked_candidates_experimental_view.csv` 可按配置输出 merged 或 missed-only 视角。
 
 ## 实验筛选建议
 
@@ -106,8 +118,11 @@ python run_pipeline.py
 - 再按 `retrieval.easy_hit_policy` 合并：
   - `prepend`：easy 在前，missed 在后。
   - `merge`：按统一分数融合。
+  - `interleave`：easy/missed 交错输出，减少 easy 全面占榜。
+  - `prepend_with_cap`：easy 先放前面，但只对前部占位数量设上限。
 - `ranked_candidates_experimental_view.csv` 即最终实验优先级视图。
 - 实验筛选默认优先参考 `experimental_priority_rank`（风险惩罚后的优先级），而不是仅看裸 `rank/final_score`。
+- 当 easy 数量非常大时，建议直接查看 `ranked_candidates_missed_only.csv` 或将 `retrieval.experimental_view_mode` 设为 `missed_only`。
 
 说明：
 - `final_score` / `rank`：模型层综合排序（检索/打分结果）。
@@ -119,6 +134,10 @@ python run_pipeline.py
 `ranked_candidates_experimental_view.csv` 现在额外包含：
 - `false_positive_risk`：综合风险分数（越高越需谨慎）
 - `generic_mco_risk_score`：落在 generic MCO 密集背景区的风险
+- `missed_rank` / `missed_experimental_priority_rank`：候选在 missed 子集内部的排序
+- `rank_shift_due_to_easy`：由于 easy 占位导致的名次后移量
+- `is_top_in_missed` / `is_top_in_merged`：是否进入各自视角的 top-N
+- `why_hidden_by_easy`：当某候选在 missed 里很靠前但在 merged 里被 easy 遮蔽时给出原因说明
 
 实现说明（已落地到特征构建）：
 - `generic_mco_risk_score` 由 `local_density_score`、`(1-positive_support_score)` 以及 MMseqs/HMM 支持弱信号组合得到，并与 `generic_mco_risk` flag 对齐校正。
@@ -133,6 +152,12 @@ python run_pipeline.py
 
 Top 导出行为：
 - `top_candidates_experimental.csv` 与 `top_candidates.fasta` 都按 `experimental_priority_rank` 前 N 导出（不再按 DataFrame 原顺序）。
+
+CV / 消融输出：
+- `cv_summary.csv` 与 `ablation_summary.csv` 现在包含 `evaluation_view`：
+  - `overall_merged`
+  - `missed_only`
+- `missed_only` 指标只在 missed 子集内部计算，更适合回答“新的远同源候选是否被排到前面”。
 
 ## Learned 分支使用建议（本轮收紧）
 
