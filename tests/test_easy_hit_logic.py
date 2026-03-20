@@ -8,7 +8,7 @@ import pandas as pd
 
 from mnox.retrieval import build_remote_candidate_pool, decide_easy_hits, rank_remote_candidates
 from mnox.io_fasta import read_fasta_records
-from run_pipeline import _build_remote_experimental_view, _export_top_ranked_subset
+from run_pipeline import _build_remote_experimental_view, _export_top_ranked_subset, _resolve_config
 
 
 class EasyHitLogicTest(unittest.TestCase):
@@ -230,6 +230,23 @@ class RemoteDiscoveryLogicTest(unittest.TestCase):
             )
             recs = read_fasta_records(tmpdir / "top_remote_candidates.fasta")
             self.assertEqual(len(recs), 2)
+
+    def test_remote_score_defaults_are_config_driven(self) -> None:
+        cfg = {
+            "input": {"positives_fasta": "positives.fasta", "unlabeled_fasta": "unlabeled.fasta"},
+            "positives": {"fasta": "positives.fasta", "metadata_csv": None},
+            "easy_hit": {},
+            "retrieval": {},
+            "remote_discovery": {"enabled": True},
+        }
+        resolved = _resolve_config(cfg)
+        ranking = resolved["remote_discovery"]["ranking"]
+        self.assertEqual(float(ranking["w_affinity"]), 0.45)
+        self.assertEqual(float(ranking["w_positive_support"]), 0.25)
+        self.assertEqual(float(ranking["w_local_density"]), 0.10)
+        self.assertEqual(float(ranking["w_novelty"]), 0.15)
+        self.assertEqual(float(ranking["w_identity_penalty"]), -0.05)
+        self.assertEqual(float(ranking["w_hmm_support"]), 0.10)
 
 
 if __name__ == "__main__":

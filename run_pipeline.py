@@ -260,13 +260,13 @@ def _resolve_config(cfg: dict) -> dict:
     rd["hmm_support"].setdefault("use_as_soft_support", True)
     rd.setdefault("ranking", {})
     rd["ranking"].setdefault("mode", "remote_score")
-    rd["ranking"].setdefault("w_affinity", 0.35)
-    rd["ranking"].setdefault("w_positive_support", 0.20)
-    rd["ranking"].setdefault("w_local_density", 0.15)
-    rd["ranking"].setdefault("w_novelty", 0.30)
+    rd["ranking"].setdefault("w_affinity", 0.45)
+    rd["ranking"].setdefault("w_positive_support", 0.25)
+    rd["ranking"].setdefault("w_local_density", 0.10)
+    rd["ranking"].setdefault("w_novelty", 0.15)
     rd["ranking"].setdefault("w_false_positive_risk", -0.15)
-    rd["ranking"].setdefault("w_identity_penalty", -0.20)
-    rd["ranking"].setdefault("w_hmm_support", 0.05)
+    rd["ranking"].setdefault("w_identity_penalty", -0.05)
+    rd["ranking"].setdefault("w_hmm_support", 0.10)
     rd.setdefault("export", {})
     rd["export"].setdefault("top_n", int(r.get("top_n_export", 200)))
     rd["export"].setdefault("make_fasta", True)
@@ -824,6 +824,45 @@ def main() -> None:
             run_dir=run_dir,
             logger=logger,
         )
+
+    remote_summary_input = cv_df.copy()
+    if "fold_gold_family" not in remote_summary_input.columns:
+        remote_summary_input["fold_gold_family"] = np.nan
+    if "n_holdout_pos_in_remote_space" not in remote_summary_input.columns:
+        remote_summary_input["n_holdout_pos_in_remote_space"] = np.nan
+    remote_only_summary = remote_summary_input[
+        remote_summary_input.get("evaluation_view", pd.Series("", index=remote_summary_input.index)).eq("remote_only")
+    ].copy()
+    if remote_only_summary.empty:
+        remote_only_summary = pd.DataFrame(
+            columns=[
+                "fold_gold_family",
+                "method",
+                "mrr",
+                "recall@20",
+                "recall@50",
+                "recall@100",
+                "n_holdout_pos_in_remote_space",
+                "remote_evaluable",
+            ]
+        )
+    else:
+        remote_only_summary = (
+            remote_only_summary.groupby(["fold_gold_family", "method"], dropna=False, as_index=False)
+            .agg(
+                {
+                    "mrr": "mean",
+                    "recall@20": "mean",
+                    "recall@50": "mean",
+                    "recall@100": "mean",
+                    "n_holdout_pos_in_remote_space": "max",
+                }
+            )
+        )
+        remote_only_summary["remote_evaluable"] = (
+            pd.to_numeric(remote_only_summary["n_holdout_pos_in_remote_space"], errors="coerce").fillna(0).ge(5)
+        )
+    remote_only_summary.to_csv(run_dir / "remote_only_summary_by_family.csv", index=False)
 
     cv_view_mode = cfg["retrieval"].get("cv_view_mode", "both")
     if cv_view_mode == "merged":

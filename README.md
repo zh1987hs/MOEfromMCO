@@ -81,6 +81,7 @@ family-aware 模式下：
   - `top_remote_candidates.csv`
   - `top_remote_candidates.fasta`
 - CV 中新增：`evaluation_view = remote_only`
+- `remote_score` 调优应在远缘筛选层（identity/qcov/tcov gate）固定后进行，不建议同时频繁改 identity gate 和 ranking 权重。
 
 最小 remote 配置示例：
 
