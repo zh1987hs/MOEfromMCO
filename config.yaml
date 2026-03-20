@@ -155,22 +155,6 @@ remote_discovery:
   tcov_min: 0.60
   require_missed_only: true
 
-  hmm_support:
-    enabled: true
-    evalue_max: 1.0e-3
-    bitscore_min: 0.0
-    use_as_soft_support: true
-
-  ranking:
-    mode: "remote_score"
-    w_affinity: 0.35
-    w_positive_support: 0.20
-    w_local_density: 0.15
-    w_novelty: 0.30
-    w_false_positive_risk: -0.15
-    w_identity_penalty: -0.20
-    w_hmm_support: 0.05
-
   export:
     top_n: 200
     make_fasta: true

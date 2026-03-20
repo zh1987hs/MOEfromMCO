@@ -68,19 +68,11 @@ family-aware 模式下：
 - `retrieval.risk.*`：风险量化权重
 - `retrieval.experimental_priority.*`：实验优先级排名中的风险惩罚权重
 
-### remote discovery 配置与默认语义
+### remote discovery（最小补充）
 
-remote discovery 的定义不是“只把 novelty 权重调高”，而是：
-
-1. **先做 identity gate**：默认要求与所有正样本最佳 identity `< 30%`
-2. **再做 coverage gate**：默认要求 `qcov >= 0.60` 且 `tcov >= 0.60`
-3. **默认只看 missed 空间**：`require_missed_only = true`
-4. **最后才在 remote 子空间中做 remote score 排序**
-
-当 `remote_discovery.enabled = true` 时：
-- 主实验输出 `ranked_candidates_experimental_view.csv` 默认来自 **remote-only 榜单**
-- `top_candidates_experimental.csv` / `top_candidates.fasta` 默认也来自 remote 榜单
-- CV 会新增 `evaluation_view = remote_only`
+- 当前仓库除 easy/missed 检索外，新增了 **remote discovery** 模式。
+- remote discovery 指默认在与所有正样本最佳 identity `< 30%` 的远缘空间中筛选候选，并要求覆盖度通过阈值。
+- 当 `remote_discovery.enabled = true` 时，主实验输出默认来自 **remote 榜单**（`ranked_candidates_experimental_view.csv`）。
 
 最小 remote 配置示例：
 
@@ -91,20 +83,10 @@ remote_discovery:
   qcov_min: 0.60
   tcov_min: 0.60
   require_missed_only: true
-  hmm_support:
-    enabled: true
-    evalue_max: 1.0e-3
-    bitscore_min: 0.0
-    use_as_soft_support: true
-  ranking:
-    mode: "remote_score"
-    w_affinity: 0.35
-    w_positive_support: 0.20
-    w_local_density: 0.15
-    w_novelty: 0.30
-    w_false_positive_risk: -0.15
-    w_identity_penalty: -0.20
-    w_hmm_support: 0.05
+  export:
+    top_n: 200
+    make_fasta: true
+    make_experimental_csv: true
 ```
 
 兼容性：旧字段 `w_affinity / w_novelty / w_local_support` 仍可读取。
