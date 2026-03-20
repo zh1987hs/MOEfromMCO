@@ -14,7 +14,13 @@ from .features import build_missed_candidate_features
 from .hmmer import build_cluster_hmms, make_hmm_easy_flags, run_hmmsearch_for_clusters
 from .io_fasta import write_fasta_records
 from .mmseqs import make_easy_hit_flags, run_mmseqs_search
-from .retrieval import decide_easy_hits, rank_candidates_with_policy
+from .retrieval import (
+    build_remote_candidate_pool,
+    decide_easy_hits,
+    evaluate_remote_only,
+    rank_remote_candidates,
+    rank_candidates_with_policy,
+)
 from .scoring import apply_heuristic_scorer
 from .training_data import build_learned_training_data
 from .utils import ensure_dir
@@ -119,9 +125,11 @@ def _evaluate_views_from_rank_ids(
     rank_ids: list[str],
     true_set: set[str],
     missed_ids: set[str],
+    remote_ids: set[str],
+    include_remote_view: bool,
     k_values: list[int],
 ) -> list[dict[str, Any]]:
-    """Return overall and missed-only metrics for a ranking."""
+    """Return overall, missed-only, and remote-only metrics for a ranking."""
     rows: list[dict[str, Any]] = []
     rows.append({"evaluation_view": "overall_merged", **_evaluate_rank(rank_ids, true_set, k_values)})
 
@@ -135,6 +143,8 @@ def _evaluate_views_from_rank_ids(
         rows.append({"evaluation_view": "missed_only", **row})
     else:
         rows.append({"evaluation_view": "missed_only", **_evaluate_rank(missed_rank_ids, true_missed, k_values)})
+    if include_remote_view:
+        rows.append({"evaluation_view": "remote_only", **evaluate_remote_only(rank_ids, true_set, remote_ids, k_values)})
     return rows
 
 
@@ -145,10 +155,15 @@ def _append_method_rows(
     rank_ids: list[str],
     true_set: set[str],
     missed_ids: set[str],
+    remote_ids: set[str],
+    include_remote_view: bool,
     k_values: list[int],
+    remote_rank_ids: list[str] | None = None,
 ) -> None:
     """Append evaluation rows for configured views."""
-    for met in _evaluate_views_from_rank_ids(rank_ids, true_set, missed_ids, k_values):
+    for met in _evaluate_views_from_rank_ids(rank_ids, true_set, missed_ids, remote_ids, include_remote_view, k_values):
+        if include_remote_view and met.get("evaluation_view") == "remote_only" and remote_rank_ids is not None:
+            met = {"evaluation_view": "remote_only", **evaluate_remote_only(remote_rank_ids, true_set, remote_ids, k_values)}
         rows.append({"method": method, "scoring_mode": scoring_mode, **met})
 
 
@@ -237,13 +252,15 @@ def _run_fold_aligned(
     emb_rank = [x for _, x in sorted(zip(d, query_ids), key=lambda t: t[0])]
 
     missed_id_set = set(missed_ids)
-
-    for method, rids in [
-        ("mmseqs_only", mm_rank),
-        ("hmmer_only", hm_rank),
-        ("embedding_only", emb_rank),
-    ]:
-        _append_method_rows(rows, method, method, rids, true_set, missed_id_set, k_values)
+    remote_ids: set[str] = set()
+    remote_enabled = bool(cfg.get("remote_discovery", {}).get("enabled", False))
+    remote_rank_ids_default: list[str] | None = None
+    remote_diag: dict[str, Any] = {
+        "n_remote": 0,
+        "remote_fraction": 0.0,
+        "n_holdout_pos_in_remote_space": 0,
+        "remote_filter_drop_reason_summary": {},
+    }
 
     # aligned hybrid
     ranked_h, _, _ = rank_candidates_with_policy(
@@ -258,7 +275,43 @@ def _run_fold_aligned(
         retrieval_cfg=cfg["retrieval"],
         scorer_mode="heuristic",
     )
-    _append_method_rows(rows, "hybrid_heuristic", "heuristic", ranked_h["candidate_id"].tolist(), true_set, missed_id_set, k_values)
+    if remote_enabled:
+        remote_pool, remote_fold_diag, _ = build_remote_candidate_pool(ranked_h, cfg["remote_discovery"])
+        remote_ranked_h = rank_remote_candidates(remote_pool, cfg["remote_discovery"])
+        remote_ids = set(remote_pool.get("candidate_id", pd.Series(dtype=str)).tolist())
+        remote_rank_ids_default = remote_ranked_h.get("candidate_id", pd.Series(dtype=str)).tolist()
+        remote_diag = {
+            "n_remote": int(remote_fold_diag.get("remote_candidates", 0)),
+            "remote_fraction": float(remote_fold_diag.get("remote_fraction", 0.0)),
+            "n_holdout_pos_in_remote_space": int(len(true_set & remote_ids)),
+            "remote_filter_drop_reason_summary": {
+                "kept": int(remote_fold_diag.get("remote_candidates", 0)),
+                "identity": int(remote_fold_diag.get("filtered_by_identity", 0)),
+                "qcov": int(remote_fold_diag.get("filtered_by_qcov", 0)),
+                "tcov": int(remote_fold_diag.get("filtered_by_tcov", 0)),
+                "easy": int(remote_fold_diag.get("filtered_by_easy", 0)),
+                "hmm_support": int(remote_fold_diag.get("filtered_by_hmm_support", 0)),
+            },
+        }
+
+    for method, rids in [
+        ("mmseqs_only", mm_rank),
+        ("hmmer_only", hm_rank),
+        ("embedding_only", emb_rank),
+    ]:
+        _append_method_rows(rows, method, method, rids, true_set, missed_id_set, remote_ids, remote_enabled, k_values)
+    _append_method_rows(
+        rows,
+        "hybrid_heuristic",
+        "heuristic",
+        ranked_h["candidate_id"].tolist(),
+        true_set,
+        missed_id_set,
+        remote_ids,
+        remote_enabled,
+        k_values,
+        remote_rank_ids=remote_rank_ids_default,
+    )
 
     # ablations
     for variant, mname in [("no_novelty", "hybrid_no_novelty"), ("no_support", "hybrid_no_support")]:
@@ -266,7 +319,13 @@ def _run_fold_aligned(
         # keep easy prepend behavior
         easy_rank = ranked_h[ranked_h.get("easy_or_missed", "") == "easy"]["candidate_id"].tolist() if "easy_or_missed" in ranked_h else []
         rank_ids = easy_rank + scored["candidate_id"].tolist()
-        _append_method_rows(rows, mname, f"heuristic_{variant}", rank_ids, true_set, missed_id_set, k_values)
+        remote_rank_ids = None
+        if remote_enabled:
+            remote_variant_df = ranked_h[ranked_h.get("easy_or_missed", pd.Series("", index=ranked_h.index)).eq("easy")].copy()
+            remote_variant_df = pd.concat([remote_variant_df, scored], ignore_index=True, sort=False)
+            remote_variant_pool, _, _ = build_remote_candidate_pool(remote_variant_df, cfg["remote_discovery"])
+            remote_rank_ids = rank_remote_candidates(remote_variant_pool, cfg["remote_discovery"]).get("candidate_id", pd.Series(dtype=str)).tolist()
+        _append_method_rows(rows, mname, f"heuristic_{variant}", rank_ids, true_set, missed_id_set, remote_ids, remote_enabled, k_values, remote_rank_ids=remote_rank_ids)
 
     # no easy split
     all_feat = build_missed_candidate_features(
@@ -284,7 +343,22 @@ def _run_fold_aligned(
         cfg=cfg["retrieval"],
     ).features
     no_easy = apply_heuristic_scorer(all_feat, cfg["retrieval"]).scored
-    _append_method_rows(rows, "hybrid_no_easy_split", "heuristic", no_easy["candidate_id"].tolist(), true_set, missed_id_set, k_values)
+    remote_rank_ids_no_easy = None
+    if remote_enabled:
+        remote_pool_no_easy, _, _ = build_remote_candidate_pool(no_easy, cfg["remote_discovery"])
+        remote_rank_ids_no_easy = rank_remote_candidates(remote_pool_no_easy, cfg["remote_discovery"]).get("candidate_id", pd.Series(dtype=str)).tolist()
+    _append_method_rows(
+        rows,
+        "hybrid_no_easy_split",
+        "heuristic",
+        no_easy["candidate_id"].tolist(),
+        true_set,
+        missed_id_set,
+        remote_ids,
+        remote_enabled,
+        k_values,
+        remote_rank_ids=remote_rank_ids_no_easy,
+    )
 
     # learned (fold-local) with train positives vs sampled background
     learned_enabled = bool(cfg["retrieval"].get("learned", {}).get("enabled", True))
@@ -319,7 +393,22 @@ def _run_fold_aligned(
                 train_feature_df=t_res.features,
                 train_labels=t_res.labels,
             )
-            _append_method_rows(rows, "hybrid_learned", "learned", ranked_l["candidate_id"].tolist(), true_set, missed_id_set, k_values)
+            remote_rank_ids_learned = None
+            if remote_enabled:
+                remote_pool_learned, _, _ = build_remote_candidate_pool(ranked_l, cfg["remote_discovery"])
+                remote_rank_ids_learned = rank_remote_candidates(remote_pool_learned, cfg["remote_discovery"]).get("candidate_id", pd.Series(dtype=str)).tolist()
+            _append_method_rows(
+                rows,
+                "hybrid_learned",
+                "learned",
+                ranked_l["candidate_id"].tolist(),
+                true_set,
+                missed_id_set,
+                remote_ids,
+                remote_enabled,
+                k_values,
+                remote_rank_ids=remote_rank_ids_learned,
+            )
         except Exception:
             pass
 
@@ -329,6 +418,7 @@ def _run_fold_aligned(
         "n_missed": len(missed_ids),
         "n_train_pos": len(train_ids),
         "n_holdout_pos": len(holdout_ids),
+        **remote_diag,
     }
     for r in rows:
         r.update(diag)

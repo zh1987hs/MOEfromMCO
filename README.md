@@ -3,6 +3,10 @@
 本项目定位是：
 **remote-homology-guided candidate prioritization pipeline for putative Mn(II)-oxidizing MCO discovery**。
 
+当前仓库支持两类目标：
+- **高置信近邻扩展**：优先利用 easy-hit / merged 排名快速扩展近邻同源候选。
+- **远缘发现（remote discovery）**：先用 identity / coverage 做硬门控，再只在 remote 子空间中排序。
+
 > 重点是提升 top-K 候选（前10/20/50）实验筛选价值，而不是直接输出 definitive functional annotation。
 
 ## 本次升级（方法学对齐 + hybrid 优化）
@@ -57,12 +61,51 @@ family-aware 模式下：
 - `retrieval.support_topk`
 - `retrieval.density_knn_k`
 - `retrieval.experimental_view_mode`: `merged | missed_only | split_outputs`
-- `retrieval.cv_view_mode`: `merged | missed_only | both`
+- `retrieval.cv_view_mode`: `merged | missed_only | remote_only | both`
 - `retrieval.export_easy_only / export_missed_only`
 - `retrieval.heuristic.*`
 - `retrieval.learned.*`
 - `retrieval.risk.*`：风险量化权重
 - `retrieval.experimental_priority.*`：实验优先级排名中的风险惩罚权重
+
+### remote discovery 配置与默认语义
+
+remote discovery 的定义不是“只把 novelty 权重调高”，而是：
+
+1. **先做 identity gate**：默认要求与所有正样本最佳 identity `< 30%`
+2. **再做 coverage gate**：默认要求 `qcov >= 0.60` 且 `tcov >= 0.60`
+3. **默认只看 missed 空间**：`require_missed_only = true`
+4. **最后才在 remote 子空间中做 remote score 排序**
+
+当 `remote_discovery.enabled = true` 时：
+- 主实验输出 `ranked_candidates_experimental_view.csv` 默认来自 **remote-only 榜单**
+- `top_candidates_experimental.csv` / `top_candidates.fasta` 默认也来自 remote 榜单
+- CV 会新增 `evaluation_view = remote_only`
+
+最小 remote 配置示例：
+
+```yaml
+remote_discovery:
+  enabled: true
+  identity_max: 0.30
+  qcov_min: 0.60
+  tcov_min: 0.60
+  require_missed_only: true
+  hmm_support:
+    enabled: true
+    evalue_max: 1.0e-3
+    bitscore_min: 0.0
+    use_as_soft_support: true
+  ranking:
+    mode: "remote_score"
+    w_affinity: 0.35
+    w_positive_support: 0.20
+    w_local_density: 0.15
+    w_novelty: 0.30
+    w_false_positive_risk: -0.15
+    w_identity_penalty: -0.20
+    w_hmm_support: 0.05
+```
 
 兼容性：旧字段 `w_affinity / w_novelty / w_local_support` 仍可读取。
 
@@ -84,17 +127,24 @@ family-aware 模式下：
 - `ranked_candidates_experimental_view.csv`
 - `ranked_candidates_missed_only.csv`
 - `ranked_candidates_easy_only.csv`
+- `ranked_candidates_remote_only.csv`
+- `ranked_candidates_remote_experimental_view.csv`
+- `top_remote_candidates.csv`
+- `top_remote_candidates.fasta`
+- `remote_discovery_diagnostics.json`
+- `remote_identity_bins.csv`
 - `cv_fold_diagnostics.json`
 - `cv_method_config_used.json`
 - `feature_importance.csv`（learned scorer可用时）
 - `ablation_summary.csv`
 
-### merged 总榜 vs missed-only 视图
+### merged 总榜 vs missed-only / remote-only 视图
 
 - `ranked_candidates.*` / `rank`：保持与当前流程兼容的 merged 总榜。
 - `ranked_candidates_missed_only.csv`：只看 missed 候选，避免 easy-hit 大量占位时把真正新候选压到几万名以后。
 - `ranked_candidates_easy_only.csv`：只看 easy hits，便于单独复核传统近同源命中。
-- `ranked_candidates_experimental_view.csv` 可按配置输出 merged 或 missed-only 视角。
+- `ranked_candidates_remote_only.csv`：只包含满足 remote gate 的候选，并按 `remote_score` 排序。
+- `ranked_candidates_experimental_view.csv` 在 `remote_discovery.enabled=true` 时默认输出 remote-only 视角。
 
 ### easy-hit 的推荐理解
 
@@ -134,9 +184,9 @@ python run_pipeline.py
   - `merge`：按统一分数融合。
   - `interleave`：easy/missed 交错输出，减少 easy 全面占榜。
   - `prepend_with_cap`：easy 先放前面，但只对前部占位数量设上限。
-- `ranked_candidates_experimental_view.csv` 即最终实验优先级视图。
+- `ranked_candidates_experimental_view.csv` 即最终实验优先级视图；在 remote 模式下默认就是 remote-only 视图。
 - 实验筛选默认优先参考 `experimental_priority_rank`（风险惩罚后的优先级），而不是仅看裸 `rank/final_score`。
-- 当 easy 数量非常大时，建议直接查看 `ranked_candidates_missed_only.csv` 或将 `retrieval.experimental_view_mode` 设为 `missed_only`。
+- 当目标是远缘发现时，建议直接启用 `remote_discovery.enabled=true`，主实验输出会切换为 remote 榜单，而不是 easy/merged 总榜。
 - easy 的默认判定不再是“任一工具命中即 easy”，而是 `consensus + balanced`：双工具支持优先，单工具命中只有在 strict 阈值下才进入 easy。
 
 说明：
@@ -169,13 +219,16 @@ python run_pipeline.py
 - 默认还会对 `easy` 命中和 `high confidence_tier` 给出轻量 bonus（可配置），随后归一化得到 `experimental_priority_score`。
 
 Top 导出行为：
-- `top_candidates_experimental.csv` 与 `top_candidates.fasta` 都按 `experimental_priority_rank` 前 N 导出（不再按 DataFrame 原顺序）。
+- 常规模式下，`top_candidates_experimental.csv` 与 `top_candidates.fasta` 按 `experimental_priority_rank` 前 N 导出。
+- remote 模式下，这两个文件默认改为从 **remote 榜单** 导出；同时还会额外输出 `top_remote_candidates.csv` 与 `top_remote_candidates.fasta`。
 
 CV / 消融输出：
 - `cv_summary.csv` 与 `ablation_summary.csv` 现在包含 `evaluation_view`：
   - `overall_merged`
   - `missed_only`
+  - `remote_only`
 - `missed_only` 指标只在 missed 子集内部计算，更适合回答“新的远同源候选是否被排到前面”。
+- `remote_only` 指标只在满足 remote gate 的子空间内部计算；若某个 fold 的 holdout positives 不落入 remote 空间，会明确记录为该视图无可评估正例（NaN），不会静默忽略。
 
 easy-hit 诊断输出：
 - `easy_hit_diagnostics.json`：记录 easy/missed 总量、easy_fraction、单工具/双工具 easy 计数、是否超过上限等。

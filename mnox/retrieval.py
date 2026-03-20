@@ -500,9 +500,9 @@ def build_remote_candidate_pool(
     work["identity_bin"] = pd.cut(work["best_identity_to_positive"].fillna(np.inf), bins=bins, labels=labels)
     identity_bins = work.groupby("identity_bin", dropna=False).agg(
         candidate_count=("candidate_id", "count"),
-        avg_novelty=("novelty_score", "mean"),
-        avg_embedding_similarity=("embedding_similarity", "mean"),
-        avg_false_positive_risk=("false_positive_risk", "mean"),
+        mean_novelty=("novelty_score", "mean"),
+        mean_embedding_similarity=("embedding_similarity", "mean"),
+        mean_false_positive_risk=("false_positive_risk", "mean"),
     ).reset_index()
     return remote_df, diag, identity_bins
 

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
 
 from mnox.cluster import (
     compute_prototypes_and_medoids,
@@ -22,7 +24,9 @@ from mnox.mmseqs import make_easy_hit_flags, run_mmseqs_search
 from mnox.plots import plot_cv_metrics
 from mnox.qc import dedupe_and_filter, qc_summary_dict, save_duplicate_map
 from mnox.retrieval import (
+    build_remote_candidate_pool,
     decide_easy_hits,
+    rank_remote_candidates,
     export_top_candidates,
     rank_candidates_with_policy,
 )
@@ -240,7 +244,111 @@ def _resolve_config(cfg: dict) -> dict:
             "use_hard_negatives": True,
         },
     )
+
+    if "remote_discovery" not in cfg:
+        cfg["remote_discovery"] = {}
+    rd = cfg["remote_discovery"]
+    rd.setdefault("enabled", False)
+    rd.setdefault("identity_max", 0.30)
+    rd.setdefault("qcov_min", 0.60)
+    rd.setdefault("tcov_min", 0.60)
+    rd.setdefault("require_missed_only", True)
+    rd.setdefault("hmm_support", {})
+    rd["hmm_support"].setdefault("enabled", True)
+    rd["hmm_support"].setdefault("evalue_max", 1e-3)
+    rd["hmm_support"].setdefault("bitscore_min", 0.0)
+    rd["hmm_support"].setdefault("use_as_soft_support", True)
+    rd.setdefault("ranking", {})
+    rd["ranking"].setdefault("mode", "remote_score")
+    rd["ranking"].setdefault("w_affinity", 0.35)
+    rd["ranking"].setdefault("w_positive_support", 0.20)
+    rd["ranking"].setdefault("w_local_density", 0.15)
+    rd["ranking"].setdefault("w_novelty", 0.30)
+    rd["ranking"].setdefault("w_false_positive_risk", -0.15)
+    rd["ranking"].setdefault("w_identity_penalty", -0.20)
+    rd["ranking"].setdefault("w_hmm_support", 0.05)
+    rd.setdefault("export", {})
+    rd["export"].setdefault("top_n", int(r.get("top_n_export", 200)))
+    rd["export"].setdefault("make_fasta", True)
+    rd["export"].setdefault("make_experimental_csv", True)
+
+    if bool(rd.get("enabled", False)):
+        r.setdefault("experimental_view_mode", "remote_only")
+        r.setdefault("cv_view_mode", "remote_only")
+        if r.get("experimental_view_mode") == "merged":
+            r["experimental_view_mode"] = "remote_only"
+        if r.get("cv_view_mode") == "both":
+            r["cv_view_mode"] = "remote_only"
     return cfg
+
+
+def _export_top_ranked_subset(
+    ranked_df: pd.DataFrame,
+    seqs: dict[str, str],
+    csv_path: Path,
+    fasta_path: Path,
+    top_n: int,
+    make_fasta: bool,
+    rank_col: str,
+) -> None:
+    """Export a top-N ranked subset with configurable CSV/FASTA targets."""
+    top_df = ranked_df.sort_values(rank_col, ascending=True).head(top_n).copy()
+    top_df.to_csv(csv_path, index=False)
+    if make_fasta:
+        records = [
+            SeqRecord(Seq(seqs[cid]), id=cid, description="")
+            for cid in top_df["candidate_id"]
+            if cid in seqs
+        ]
+        write_fasta_records(records, fasta_path)
+
+
+def _export_top_remote_candidates(
+    ranked_remote: pd.DataFrame,
+    seqs: dict[str, str],
+    run_dir: Path,
+    remote_cfg: dict,
+) -> None:
+    """Export top-N remote-only candidates as CSV/FASTA."""
+    export_cfg = remote_cfg.get("export", {})
+    top_n = int(export_cfg.get("top_n", 200))
+    make_fasta = bool(export_cfg.get("make_fasta", True))
+    _export_top_ranked_subset(
+        ranked_remote,
+        seqs,
+        run_dir / "top_remote_candidates.csv",
+        run_dir / "top_remote_candidates.fasta",
+        top_n,
+        make_fasta,
+        "remote_rank",
+    )
+
+
+def _build_remote_experimental_view(ranked_remote: pd.DataFrame) -> pd.DataFrame:
+    """Build experiment-facing remote-only ranking view."""
+    remote_cols = [
+        "remote_rank",
+        "candidate_id",
+        "nearest_positive_family",
+        "best_identity_to_positive",
+        "mmseqs_best_qcov",
+        "mmseqs_best_tcov",
+        "embedding_similarity",
+        "positive_support_score",
+        "local_density_score",
+        "novelty_score",
+        "hmm_best_evalue",
+        "hmm_best_bitscore",
+        "false_positive_risk",
+        "confidence_tier",
+        "flags",
+        "reason_for_high_rank",
+        "remote_score",
+    ]
+    exp = ranked_remote[[c for c in remote_cols if c in ranked_remote.columns]].copy()
+    if "flags" in exp.columns:
+        exp = exp.rename(columns={"flags": "risk_flags"})
+    return exp.sort_values("remote_rank", ascending=True).reset_index(drop=True)
 
 
 def _easy_overlap_summary(
@@ -332,6 +440,12 @@ def main() -> None:
         "retrieval.experimental_view_mode=%s cv_view_mode=%s",
         cfg["retrieval"]["experimental_view_mode"],
         cfg["retrieval"]["cv_view_mode"],
+    )
+    logger.info(
+        "remote_discovery.enabled=%s identity_max=%.2f require_missed_only=%s",
+        cfg["remote_discovery"].get("enabled", False),
+        float(cfg["remote_discovery"].get("identity_max", 0.30)),
+        cfg["remote_discovery"].get("require_missed_only", True),
     )
 
     check_python_dependencies()
@@ -578,6 +692,17 @@ def main() -> None:
     write_dataframe(ranked, run_dir / "ranked_candidates", logger)
     feat_df.to_csv(run_dir / "ranked_candidates_features.csv", index=False)
 
+    remote_enabled = bool(cfg["remote_discovery"].get("enabled", False))
+    remote_ranked = pd.DataFrame()
+    remote_diag: dict[str, object] = {}
+    remote_identity_bins = pd.DataFrame()
+    if remote_enabled:
+        remote_pool, remote_diag, remote_identity_bins = build_remote_candidate_pool(ranked, cfg["remote_discovery"])
+        remote_ranked = rank_remote_candidates(remote_pool, cfg["remote_discovery"])
+        remote_ranked.to_csv(run_dir / "ranked_candidates_remote_only.csv", index=False)
+        save_json(remote_diag, run_dir / "remote_discovery_diagnostics.json")
+        remote_identity_bins.to_csv(run_dir / "remote_identity_bins.csv", index=False)
+
     if bool(cfg["retrieval"].get("export_missed_only", True)):
         missed_mask = ranked["easy_or_missed"].eq("missed") if "easy_or_missed" in ranked.columns else pd.Series(False, index=ranked.index)
         missed_only = ranked[missed_mask].copy()
@@ -629,7 +754,9 @@ def main() -> None:
     exp_view = ranked[[c for c in experimental_cols if c in ranked.columns]].copy()
     exp_view = exp_view.rename(columns={"dominant_signal_type": "main_supporting_signals", "flags": "risk_flags"})
     experimental_view_mode = cfg["retrieval"].get("experimental_view_mode", "merged")
-    if experimental_view_mode == "missed_only":
+    if remote_enabled and experimental_view_mode == "remote_only":
+        exp_view = _build_remote_experimental_view(remote_ranked)
+    elif experimental_view_mode == "missed_only":
         exp_missed_mask = exp_view["easy_or_missed"].eq("missed") if "easy_or_missed" in exp_view.columns else pd.Series(False, index=exp_view.index)
         exp_view = exp_view[exp_missed_mask].copy()
         if "missed_experimental_priority_rank" in exp_view.columns:
@@ -639,11 +766,27 @@ def main() -> None:
             exp_view = exp_view.sort_values("experimental_priority_rank", ascending=True).reset_index(drop=True)
     exp_view.to_csv(run_dir / "ranked_candidates_experimental_view.csv", index=False)
 
+    if remote_enabled and bool(cfg["remote_discovery"].get("export", {}).get("make_experimental_csv", True)):
+        remote_exp_view = _build_remote_experimental_view(remote_ranked)
+        remote_exp_view.to_csv(run_dir / "ranked_candidates_remote_experimental_view.csv", index=False)
+
     if fi_df is not None and not fi_df.empty:
         fi_df.to_csv(run_dir / "feature_importance.csv", index=False)
 
     unl_seqs = id_to_seq_dict(run_dir / "unlabeled_qc.fasta")
-    export_top_candidates(ranked, unl_seqs, run_dir, cfg["retrieval"]["top_n_export"])
+    if remote_enabled:
+        _export_top_ranked_subset(
+            remote_ranked,
+            unl_seqs,
+            run_dir / "top_candidates_experimental.csv",
+            run_dir / "top_candidates.fasta",
+            int(cfg["remote_discovery"].get("export", {}).get("top_n", 200)),
+            bool(cfg["remote_discovery"].get("export", {}).get("make_fasta", True)),
+            "remote_rank",
+        )
+        _export_top_remote_candidates(remote_ranked, unl_seqs, run_dir, cfg["remote_discovery"])
+    else:
+        export_top_candidates(ranked, unl_seqs, run_dir, cfg["retrieval"]["top_n_export"])
 
     # Step 8 CV (aligned with discovery flow)
     eval_mode = cfg["evaluation"]["mode"]
@@ -683,11 +826,14 @@ def main() -> None:
     elif cv_view_mode == "missed_only":
         eval_view = cv_df["evaluation_view"] if "evaluation_view" in cv_df.columns else pd.Series("", index=cv_df.index)
         cv_df = cv_df[eval_view == "missed_only"].copy()
+    elif cv_view_mode == "remote_only":
+        eval_view = cv_df["evaluation_view"] if "evaluation_view" in cv_df.columns else pd.Series("", index=cv_df.index)
+        cv_df = cv_df[eval_view == "remote_only"].copy()
 
     required_cv_cols = [
         "evaluation_mode", "evaluation_view", "fold_gold_family", "leakage_guard", "method", "scoring_mode", "easy_hit_policy",
         "mrr", "recall@10", "recall@20", "recall@50", "recall@100", "ef@10", "ef@20", "ef@50", "ef@100",
-        "n_easy", "n_missed", "n_train_pos", "n_holdout_pos",
+        "n_easy", "n_missed", "n_remote", "remote_fraction", "n_holdout_pos", "n_holdout_pos_in_remote_space", "n_train_pos",
     ]
     for c in required_cv_cols:
         if c not in cv_df.columns:
@@ -700,6 +846,7 @@ def main() -> None:
                 "evaluation": cfg["evaluation"],
                 "positive_clustering": cfg["positive_clustering"],
                 "retrieval": cfg["retrieval"],
+                "remote_discovery": cfg["remote_discovery"],
             },
             f,
             indent=2,

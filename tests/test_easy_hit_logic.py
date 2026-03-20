@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from mnox.retrieval import decide_easy_hits
+from mnox.retrieval import build_remote_candidate_pool, decide_easy_hits, rank_remote_candidates
 
 
 class EasyHitLogicTest(unittest.TestCase):
@@ -87,6 +87,89 @@ class EasyHitLogicTest(unittest.TestCase):
         decided, diag = decide_easy_hits(candidate_ids, mm, hmm, {**self.easy_cfg, "calibrate": True})
         self.assertLessEqual(float(diag["easy_fraction"]), 0.30)
         self.assertEqual(int((decided["easy_confidence_class"] == "hmm_strict_only").sum()), 2)
+
+
+class RemoteDiscoveryLogicTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.remote_cfg = {
+            "enabled": True,
+            "identity_max": 0.30,
+            "qcov_min": 0.60,
+            "tcov_min": 0.60,
+            "require_missed_only": True,
+            "hmm_support": {
+                "enabled": True,
+                "evalue_max": 1e-3,
+                "bitscore_min": 0.0,
+                "use_as_soft_support": True,
+            },
+            "ranking": {
+                "mode": "remote_score",
+                "w_affinity": 0.35,
+                "w_positive_support": 0.20,
+                "w_local_density": 0.15,
+                "w_novelty": 0.30,
+                "w_false_positive_risk": -0.15,
+                "w_identity_penalty": -0.20,
+                "w_hmm_support": 0.05,
+            },
+        }
+
+    def test_remote_pool_enforces_identity_and_coverage_gates(self) -> None:
+        ranked = pd.DataFrame(
+            {
+                "candidate_id": ["hi_identity", "remote_good", "remote_good_2", "low_qcov", "easy_remote"],
+                "easy_or_missed": ["missed", "missed", "missed", "missed", "easy"],
+                "mmseqs_best_fident": [0.35, 0.18, 0.22, 0.12, 0.18],
+                "mmseqs_best_qcov": [0.90, 0.75, 0.82, 0.50, 0.88],
+                "mmseqs_best_tcov": [0.90, 0.70, 0.76, 0.80, 0.90],
+                "embedding_similarity": [0.20, 0.80, 0.65, 0.70, 0.90],
+                "positive_support_score": [0.20, 0.70, 0.62, 0.60, 0.80],
+                "local_density_score": [0.30, 0.40, 0.45, 0.30, 0.30],
+                "novelty_score": [0.95, 0.65, 0.72, 0.90, 0.70],
+                "false_positive_risk": [0.10, 0.20, 0.18, 0.15, 0.05],
+                "hmm_best_evalue": [1e-2, 1e-6, 1e-4, 1e-5, 1e-8],
+                "hmm_best_bitscore": [5.0, 30.0, 25.0, 20.0, 40.0],
+                "confidence_tier": ["medium", "high", "medium", "medium", "high"],
+                "flags": ["", "", "", "", ""],
+                "reason_for_high_rank": ["novel", "supported_remote", "supported_remote", "low_cov", "easy_hit"],
+                "nearest_positive_family": ["F1", "F1", "F2", "F2", "F3"],
+            }
+        )
+
+        remote_df, diag, _ = build_remote_candidate_pool(ranked, self.remote_cfg)
+        remote_ranked = rank_remote_candidates(remote_df, self.remote_cfg)
+
+        self.assertEqual(remote_df["candidate_id"].tolist(), ["remote_good", "remote_good_2"])
+        self.assertTrue((remote_df["best_identity_to_positive"] < 0.30).all())
+        self.assertTrue((remote_df["mmseqs_best_qcov"] >= 0.60).all())
+        self.assertTrue((remote_df["mmseqs_best_tcov"] >= 0.60).all())
+        self.assertEqual(int(diag["filtered_by_identity"]), 1)
+        self.assertEqual(int(diag["filtered_by_qcov"]), 1)
+        self.assertEqual(int(diag["filtered_by_easy"]), 1)
+        self.assertTrue(remote_ranked["remote_rank"].tolist() == [1, 2])
+        self.assertEqual(remote_ranked["remote_rank"].nunique(), len(remote_ranked))
+        self.assertTrue((remote_ranked["easy_or_missed"] == "missed").all())
+
+    def test_high_novelty_but_identity_35_cannot_enter_remote(self) -> None:
+        ranked = pd.DataFrame(
+            {
+                "candidate_id": ["novel_but_too_close"],
+                "easy_or_missed": ["missed"],
+                "mmseqs_best_fident": [0.35],
+                "mmseqs_best_qcov": [0.95],
+                "mmseqs_best_tcov": [0.95],
+                "embedding_similarity": [0.50],
+                "positive_support_score": [0.50],
+                "local_density_score": [0.30],
+                "novelty_score": [0.99],
+                "false_positive_risk": [0.05],
+                "hmm_best_evalue": [1e-8],
+                "hmm_best_bitscore": [50.0],
+            }
+        )
+        remote_df, _, _ = build_remote_candidate_pool(ranked, self.remote_cfg)
+        self.assertTrue(remote_df.empty)
 
 
 if __name__ == "__main__":

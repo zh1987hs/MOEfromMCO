@@ -99,8 +99,8 @@ retrieval:
   scorer: "heuristic"              # heuristic | learned
   affinity_metric: "cosine"
   easy_hit_policy: "prepend"       # prepend | merge | interleave | prepend_with_cap
-  experimental_view_mode: "merged" # merged | missed_only | split_outputs
-  cv_view_mode: "both"             # merged | missed_only | both
+  experimental_view_mode: "merged" # merged | missed_only | split_outputs | remote_only
+  cv_view_mode: "both"             # merged | missed_only | remote_only | both
   export_easy_only: true
   export_missed_only: true
   easy_prepend_cap: 200
@@ -147,6 +147,34 @@ retrieval:
     use_hard_negatives: true
 
   top_n_export: 200
+
+remote_discovery:
+  enabled: true
+  identity_max: 0.30
+  qcov_min: 0.60
+  tcov_min: 0.60
+  require_missed_only: true
+
+  hmm_support:
+    enabled: true
+    evalue_max: 1.0e-3
+    bitscore_min: 0.0
+    use_as_soft_support: true
+
+  ranking:
+    mode: "remote_score"
+    w_affinity: 0.35
+    w_positive_support: 0.20
+    w_local_density: 0.15
+    w_novelty: 0.30
+    w_false_positive_risk: -0.15
+    w_identity_penalty: -0.20
+    w_hmm_support: 0.05
+
+  export:
+    top_n: 200
+    make_fasta: true
+    make_experimental_csv: true
 
 evaluation:
   mode: "loco"                        # loco | leave_one_gold_family_out
