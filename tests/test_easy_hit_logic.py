@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
 from mnox.retrieval import build_remote_candidate_pool, decide_easy_hits, rank_remote_candidates
+from mnox.io_fasta import read_fasta_records
+from run_pipeline import _build_remote_experimental_view, _export_top_ranked_subset
 
 
 class EasyHitLogicTest(unittest.TestCase):
@@ -170,6 +174,60 @@ class RemoteDiscoveryLogicTest(unittest.TestCase):
         )
         remote_df, _, _ = build_remote_candidate_pool(ranked, self.remote_cfg)
         self.assertTrue(remote_df.empty)
+
+    def test_remote_experimental_view_tracks_remote_rank_order(self) -> None:
+        remote_ranked = pd.DataFrame(
+            {
+                "remote_rank": [2, 1],
+                "candidate_id": ["r2", "r1"],
+                "nearest_positive_family": ["F2", "F1"],
+                "best_identity_to_positive": [0.22, 0.18],
+                "mmseqs_best_qcov": [0.75, 0.88],
+                "mmseqs_best_tcov": [0.74, 0.80],
+                "embedding_similarity": [0.70, 0.81],
+                "positive_support_score": [0.62, 0.77],
+                "local_density_score": [0.45, 0.35],
+                "novelty_score": [0.73, 0.69],
+                "hmm_best_evalue": [1e-4, 1e-7],
+                "hmm_best_bitscore": [26.0, 40.0],
+                "false_positive_risk": [0.18, 0.12],
+                "confidence_tier": ["medium", "high"],
+                "flags": ["flag_b", "flag_a"],
+                "reason_for_high_rank": ["remote_b", "remote_a"],
+                "remote_score": [0.71, 0.84],
+            }
+        )
+
+        exp_view = _build_remote_experimental_view(remote_ranked)
+        self.assertEqual(exp_view["candidate_id"].tolist(), ["r1", "r2"])
+        self.assertEqual(exp_view["remote_rank"].tolist(), [1, 2])
+        self.assertEqual(exp_view["experimental_priority_rank"].tolist(), [1, 2])
+        self.assertIn("risk_flags", exp_view.columns)
+        self.assertNotIn("flags", exp_view.columns)
+
+    def test_top_remote_fasta_count_matches_top_n_or_remote_size(self) -> None:
+        ranked_remote = pd.DataFrame(
+            {
+                "candidate_id": ["r1", "r2", "r3"],
+                "remote_rank": [1, 2, 3],
+                "remote_score": [0.9, 0.8, 0.7],
+            }
+        )
+        seqs = {"r1": "MAAA", "r2": "MBBB", "r3": "MCCC"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            _export_top_ranked_subset(
+                ranked_remote,
+                seqs,
+                tmpdir / "top_remote_candidates.csv",
+                tmpdir / "top_remote_candidates.fasta",
+                top_n=2,
+                make_fasta=True,
+                rank_col="remote_rank",
+            )
+            recs = read_fasta_records(tmpdir / "top_remote_candidates.fasta")
+            self.assertEqual(len(recs), 2)
 
 
 if __name__ == "__main__":

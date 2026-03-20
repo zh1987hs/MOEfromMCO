@@ -326,8 +326,12 @@ def _export_top_remote_candidates(
 
 def _build_remote_experimental_view(ranked_remote: pd.DataFrame) -> pd.DataFrame:
     """Build experiment-facing remote-only ranking view."""
+    out = ranked_remote.copy()
+    if "remote_rank" in out.columns and "experimental_priority_rank" not in out.columns:
+        out["experimental_priority_rank"] = out["remote_rank"]
     remote_cols = [
         "remote_rank",
+        "experimental_priority_rank",
         "candidate_id",
         "nearest_positive_family",
         "best_identity_to_positive",
@@ -345,7 +349,7 @@ def _build_remote_experimental_view(ranked_remote: pd.DataFrame) -> pd.DataFrame
         "reason_for_high_rank",
         "remote_score",
     ]
-    exp = ranked_remote[[c for c in remote_cols if c in ranked_remote.columns]].copy()
+    exp = out[[c for c in remote_cols if c in out.columns]].copy()
     if "flags" in exp.columns:
         exp = exp.rename(columns={"flags": "risk_flags"})
     return exp.sort_values("remote_rank", ascending=True).reset_index(drop=True)
@@ -751,10 +755,11 @@ def main() -> None:
         "flags",
         "reason_for_high_rank",
     ]
+    experimental_view_mode = cfg["retrieval"].get("experimental_view_mode", "merged")
+    remote_only_mode = remote_enabled and experimental_view_mode == "remote_only"
     exp_view = ranked[[c for c in experimental_cols if c in ranked.columns]].copy()
     exp_view = exp_view.rename(columns={"dominant_signal_type": "main_supporting_signals", "flags": "risk_flags"})
-    experimental_view_mode = cfg["retrieval"].get("experimental_view_mode", "merged")
-    if remote_enabled and experimental_view_mode == "remote_only":
+    if remote_only_mode:
         exp_view = _build_remote_experimental_view(remote_ranked)
     elif experimental_view_mode == "missed_only":
         exp_missed_mask = exp_view["easy_or_missed"].eq("missed") if "easy_or_missed" in exp_view.columns else pd.Series(False, index=exp_view.index)
@@ -774,7 +779,7 @@ def main() -> None:
         fi_df.to_csv(run_dir / "feature_importance.csv", index=False)
 
     unl_seqs = id_to_seq_dict(run_dir / "unlabeled_qc.fasta")
-    if remote_enabled:
+    if remote_only_mode:
         _export_top_ranked_subset(
             remote_ranked,
             unl_seqs,
@@ -784,9 +789,10 @@ def main() -> None:
             bool(cfg["remote_discovery"].get("export", {}).get("make_fasta", True)),
             "remote_rank",
         )
-        _export_top_remote_candidates(remote_ranked, unl_seqs, run_dir, cfg["remote_discovery"])
     else:
         export_top_candidates(ranked, unl_seqs, run_dir, cfg["retrieval"]["top_n_export"])
+    if remote_enabled:
+        _export_top_remote_candidates(remote_ranked, unl_seqs, run_dir, cfg["remote_discovery"])
 
     # Step 8 CV (aligned with discovery flow)
     eval_mode = cfg["evaluation"]["mode"]
