@@ -74,7 +74,7 @@ family-aware 模式下：
   - easy / missed / merged 常规视图
   - remote discovery 远缘发现视图
 - remote discovery 指默认在与所有正样本最佳 identity `< 30%` 的远缘空间中筛选候选，并要求覆盖度通过阈值，且默认只在 missed 空间中搜索。
-- 当 `experimental_view_mode = remote_only` 时，主实验输出默认来自 **remote 榜单**（`ranked_candidates_experimental_view.csv`）。
+- 当 `remote_discovery.enabled = true` 且 `experimental_view_mode = remote_only` 时，主实验输出默认来自 **remote 榜单**（`ranked_candidates_experimental_view.csv`）。
 - remote-only 主输出文件：
   - `ranked_candidates_remote_only.csv`
   - `ranked_candidates_remote_experimental_view.csv`

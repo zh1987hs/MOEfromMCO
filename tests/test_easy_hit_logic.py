@@ -199,9 +199,11 @@ class RemoteDiscoveryLogicTest(unittest.TestCase):
         )
 
         exp_view = _build_remote_experimental_view(remote_ranked)
+        remote_exp_view = _build_remote_experimental_view(remote_ranked)
         self.assertEqual(exp_view["candidate_id"].tolist(), ["r1", "r2"])
         self.assertEqual(exp_view["remote_rank"].tolist(), [1, 2])
         self.assertEqual(exp_view["experimental_priority_rank"].tolist(), [1, 2])
+        self.assertEqual(exp_view["candidate_id"].head(2).tolist(), remote_exp_view["candidate_id"].head(2).tolist())
         self.assertIn("risk_flags", exp_view.columns)
         self.assertNotIn("flags", exp_view.columns)
 
