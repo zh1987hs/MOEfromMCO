@@ -403,3 +403,166 @@ def export_top_candidates(
         for cluster_id, sub in top.groupby(cluster_col):
             recs = [SeqRecord(Seq(seqs[cid]), id=cid, description="") for cid in sub["candidate_id"] if cid in seqs]
             write_fasta_records(recs, by_cluster_dir / f"cluster_{cluster_id}.fasta")
+
+
+def _remote_hmm_support_score(df: pd.DataFrame, remote_cfg: dict[str, Any]) -> pd.Series:
+    hmm_cfg = remote_cfg.get("hmm_support", {})
+    if not bool(hmm_cfg.get("enabled", True)):
+        return pd.Series(0.0, index=df.index)
+    evalue_ok = pd.to_numeric(df.get("hmm_best_evalue", pd.Series(np.inf, index=df.index)), errors="coerce").fillna(np.inf)
+    bits = pd.to_numeric(df.get("hmm_best_bitscore", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+    e_thr = float(hmm_cfg.get("evalue_max", 1e-3))
+    b_thr = float(hmm_cfg.get("bitscore_min", 0.0))
+    e_score = (-np.log10(evalue_ok.clip(lower=1e-300)) / max(-np.log10(e_thr), 1e-9)).clip(0.0, 1.0)
+    b_score = (bits / max(b_thr, 1.0)).clip(0.0, 1.0) if b_thr > 0 else (bits > 0).astype(float)
+    return np.maximum(e_score, b_score)
+
+
+def build_remote_candidate_pool(
+    ranked_df: pd.DataFrame,
+    remote_cfg: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any], pd.DataFrame]:
+    """Filter ranked candidates into remote discovery space using hard constraints."""
+    if ranked_df.empty:
+        empty_diag = {
+            "total_candidates": 0,
+            "remote_candidates": 0,
+            "remote_fraction": 0.0,
+            "filtered_by_identity": 0,
+            "filtered_by_qcov": 0,
+            "filtered_by_tcov": 0,
+            "filtered_by_easy": 0,
+            "filtered_by_hmm_support": 0,
+            "identity_distribution_summary": {},
+            "novelty_distribution_summary": {},
+        }
+        return ranked_df.copy(), empty_diag, pd.DataFrame()
+
+    df = ranked_df.copy()
+    identity_max = float(remote_cfg.get("identity_max", 0.30))
+    qcov_min = float(remote_cfg.get("qcov_min", 0.60))
+    tcov_min = float(remote_cfg.get("tcov_min", 0.60))
+    require_missed_only = bool(remote_cfg.get("require_missed_only", True))
+    hmm_cfg = remote_cfg.get("hmm_support", {})
+
+    df["best_identity_to_positive"] = pd.to_numeric(df.get("mmseqs_best_fident", np.nan), errors="coerce")
+    df["max_identity_to_positives"] = df["best_identity_to_positive"]
+    df["identity_penalty"] = (df["best_identity_to_positive"].fillna(1.0) / max(identity_max, 1e-9)).clip(0.0, 1.0)
+    df["hmm_support_score"] = _remote_hmm_support_score(df, remote_cfg)
+
+    pass_identity = df["best_identity_to_positive"].fillna(1.0) < identity_max
+    pass_qcov = pd.to_numeric(df.get("mmseqs_best_qcov", np.nan), errors="coerce").fillna(0.0) >= qcov_min
+    pass_tcov = pd.to_numeric(df.get("mmseqs_best_tcov", np.nan), errors="coerce").fillna(0.0) >= tcov_min
+    pass_easy = (~df.get("easy_or_missed", pd.Series("missed", index=df.index)).fillna("missed").eq("easy")) if require_missed_only else pd.Series(True, index=df.index)
+    pass_hmm = (
+        pd.to_numeric(df.get("hmm_best_evalue", np.nan), errors="coerce").fillna(np.inf) <= float(hmm_cfg.get("evalue_max", 1e-3))
+    ) | (
+        pd.to_numeric(df.get("hmm_best_bitscore", np.nan), errors="coerce").fillna(0.0) >= float(hmm_cfg.get("bitscore_min", 0.0))
+    )
+    if not bool(hmm_cfg.get("enabled", True)) or bool(hmm_cfg.get("use_as_soft_support", True)):
+        pass_hmm = pd.Series(True, index=df.index)
+
+    df["remote_pass_identity"] = pass_identity
+    df["remote_pass_qcov"] = pass_qcov
+    df["remote_pass_tcov"] = pass_tcov
+    df["remote_pass_easy"] = pass_easy
+    df["remote_pass_hmm_support"] = pass_hmm
+    df["remote_candidate"] = pass_identity & pass_qcov & pass_tcov & pass_easy & pass_hmm
+    df["remote_filter_drop_reason"] = np.select(
+        [
+            ~pass_identity,
+            pass_identity & ~pass_qcov,
+            pass_identity & pass_qcov & ~pass_tcov,
+            pass_identity & pass_qcov & pass_tcov & ~pass_easy,
+            pass_identity & pass_qcov & pass_tcov & pass_easy & ~pass_hmm,
+        ],
+        ["identity", "qcov", "tcov", "easy", "hmm_support"],
+        default="kept",
+    )
+
+    remote_df = df[df["remote_candidate"]].copy()
+    diag = {
+        "total_candidates": int(len(df)),
+        "remote_candidates": int(len(remote_df)),
+        "remote_fraction": float(len(remote_df) / max(len(df), 1)),
+        "filtered_by_identity": int((~pass_identity).sum()),
+        "filtered_by_qcov": int((pass_identity & ~pass_qcov).sum()),
+        "filtered_by_tcov": int((pass_identity & pass_qcov & ~pass_tcov).sum()),
+        "filtered_by_easy": int((pass_identity & pass_qcov & pass_tcov & ~pass_easy).sum()),
+        "filtered_by_hmm_support": int((pass_identity & pass_qcov & pass_tcov & pass_easy & ~pass_hmm).sum()),
+        "identity_distribution_summary": df["best_identity_to_positive"].describe().fillna(0.0).to_dict(),
+        "novelty_distribution_summary": pd.to_numeric(df.get("novelty_score", pd.Series(0.0, index=df.index)), errors="coerce").describe().fillna(0.0).to_dict(),
+    }
+
+    bins = [-np.inf, 0.10, 0.20, 0.30, 0.40, np.inf]
+    labels = ["0-0.10", "0.10-0.20", "0.20-0.30", "0.30-0.40", ">0.40"]
+    work = df.copy()
+    work["identity_bin"] = pd.cut(work["best_identity_to_positive"].fillna(np.inf), bins=bins, labels=labels)
+    identity_bins = work.groupby("identity_bin", dropna=False).agg(
+        candidate_count=("candidate_id", "count"),
+        avg_novelty=("novelty_score", "mean"),
+        avg_embedding_similarity=("embedding_similarity", "mean"),
+        avg_false_positive_risk=("false_positive_risk", "mean"),
+    ).reset_index()
+    return remote_df, diag, identity_bins
+
+
+def compute_remote_score(remote_df: pd.DataFrame, remote_cfg: dict[str, Any]) -> pd.DataFrame:
+    """Compute remote-discovery score inside filtered remote space."""
+    if remote_df.empty:
+        return remote_df.copy()
+    rcfg = remote_cfg.get("ranking", {})
+    out = remote_df.copy()
+    out["remote_score"] = (
+        float(rcfg.get("w_affinity", 0.35)) * pd.to_numeric(out.get("embedding_similarity", 0.0), errors="coerce").fillna(0.0)
+        + float(rcfg.get("w_positive_support", 0.20)) * pd.to_numeric(out.get("positive_support_score", 0.0), errors="coerce").fillna(0.0)
+        + float(rcfg.get("w_local_density", 0.15)) * pd.to_numeric(out.get("local_density_score", 0.0), errors="coerce").fillna(0.0)
+        + float(rcfg.get("w_novelty", 0.30)) * pd.to_numeric(out.get("novelty_score", 0.0), errors="coerce").fillna(0.0)
+        + float(rcfg.get("w_hmm_support", 0.05)) * pd.to_numeric(out.get("hmm_support_score", 0.0), errors="coerce").fillna(0.0)
+        - abs(float(rcfg.get("w_false_positive_risk", -0.15))) * pd.to_numeric(out.get("false_positive_risk", 0.0), errors="coerce").fillna(0.0)
+        - abs(float(rcfg.get("w_identity_penalty", -0.20))) * pd.to_numeric(out.get("identity_penalty", 0.0), errors="coerce").fillna(0.0)
+    )
+    return out
+
+
+def rank_remote_candidates(remote_df: pd.DataFrame, remote_cfg: dict[str, Any]) -> pd.DataFrame:
+    """Rank candidates in the remote discovery space only."""
+    out = compute_remote_score(remote_df, remote_cfg)
+    if out.empty:
+        out["remote_rank"] = pd.Series(dtype=int)
+        return out
+    out = out.sort_values("remote_score", ascending=False).reset_index(drop=True)
+    out["remote_rank"] = np.arange(1, len(out) + 1)
+    out["experimental_priority_rank"] = out["remote_rank"]
+    return out
+
+
+def evaluate_remote_only(
+    rank_ids: list[str],
+    true_set: set[str],
+    remote_ids: set[str],
+    k_values: list[int],
+) -> dict[str, float]:
+    """Evaluate ranking restricted to remote candidate pool."""
+    remote_rank_ids = [rid for rid in rank_ids if rid in remote_ids]
+    true_remote = true_set & remote_ids
+    if len(true_remote) == 0:
+        row = {"mrr": np.nan}
+        for k in k_values:
+            row[f"recall@{k}"] = np.nan
+            row[f"ef@{k}"] = np.nan
+        return row
+    return {
+        "mrr": next((1.0 / i for i, sid in enumerate(remote_rank_ids, 1) if sid in true_remote), 0.0),
+        **{
+            f"recall@{k}": sum(1 for i in remote_rank_ids[:k] if i in true_remote) / max(1, len(true_remote))
+            for k in k_values
+        },
+        **{
+            f"ef@{k}": (
+                sum(1 for i in remote_rank_ids[:k] if i in true_remote)
+                / max(k * (len(true_remote) / max(1, len(remote_rank_ids))), 1e-9)
+            )
+            for k in k_values
+        },
+    }
