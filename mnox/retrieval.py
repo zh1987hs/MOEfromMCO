@@ -1,0 +1,568 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
+
+from .features import FeatureBuildResult, build_easy_rank_table, build_missed_candidate_features
+from .io_fasta import write_fasta_records
+from .scoring import ScoringResult, apply_heuristic_scorer, apply_learned_scorer
+
+
+def _series_bool(df: pd.DataFrame, col: str, default: bool = False) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(default, index=df.index, dtype=bool)
+    return df[col].fillna(default).astype(bool)
+
+
+def _series_float(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(default, index=df.index, dtype=float)
+    return pd.to_numeric(df[col], errors="coerce").fillna(default).astype(float)
+
+
+def _profile_name(easy_cfg: dict[str, Any]) -> str:
+    return str(easy_cfg.get("profile", "balanced")).lower()
+
+
+def _normalize_easy_scores(easy_df: pd.DataFrame) -> pd.DataFrame:
+    """Map easy-hit strength onto a 0..1 score range for merged policies."""
+    e = easy_df.copy()
+    if len(e) == 0:
+        return e
+    denom = e["easy_score"].max() - e["easy_score"].min() + 1e-9
+    e["final_score"] = (e["easy_score"] - e["easy_score"].min()) / denom
+    e["scoring_mode"] = "easy_strength"
+    e["confidence_tier"] = "high"
+    e["reason_for_high_rank"] = "strong_easy_hit"
+    e["dominant_signal_type"] = "mmseqs/hmm"
+    e["flags"] = ""
+    return e
+
+
+def _merge_easy_and_missed(easy_df: pd.DataFrame, missed_df: pd.DataFrame, retrieval_cfg: dict[str, Any]) -> pd.DataFrame:
+    """Merge easy and missed tables using configured policy."""
+    policy = retrieval_cfg.get("easy_hit_policy", "prepend")
+    if policy == "merge":
+        e = _normalize_easy_scores(easy_df)
+        return pd.concat([e, missed_df], ignore_index=True, sort=False).sort_values("final_score", ascending=False)
+
+    if policy == "interleave":
+        e = _normalize_easy_scores(easy_df).reset_index(drop=True)
+        m = missed_df.copy().reset_index(drop=True)
+        rows: list[pd.Series] = []
+        max_len = max(len(e), len(m))
+        for i in range(max_len):
+            if i < len(e):
+                rows.append(e.iloc[i])
+            if i < len(m):
+                rows.append(m.iloc[i])
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=pd.Index([]))
+
+    if policy == "prepend_with_cap":
+        cap = int(retrieval_cfg.get("easy_prepend_cap", retrieval_cfg.get("top_n_export", 200)))
+        e = easy_df.copy()
+        head = e.head(cap)
+        tail = e.iloc[cap:]
+        return pd.concat([head, missed_df, tail], ignore_index=True, sort=False)
+
+    return pd.concat([easy_df, missed_df], ignore_index=True, sort=False)
+
+
+def _add_split_view_columns(combined: pd.DataFrame, easy_df: pd.DataFrame, missed_df: pd.DataFrame, retrieval_cfg: dict[str, Any]) -> pd.DataFrame:
+    """Add missed/easy-local ranks and experimental triage diagnostics."""
+    out = combined.copy()
+
+    easy_rank_map: dict[str, int] = {}
+    if not easy_df.empty:
+        e = easy_df.copy().reset_index(drop=True)
+        e["easy_rank"] = np.arange(1, len(e) + 1)
+        easy_rank_map = dict(zip(e["candidate_id"], e["easy_rank"]))
+
+    missed_rank_map: dict[str, int] = {}
+    missed_exp_map: dict[str, int] = {}
+    if not missed_df.empty:
+        m = missed_df.copy().reset_index(drop=True)
+        m["missed_rank"] = np.arange(1, len(m) + 1)
+        if "experimental_priority_score" in m.columns:
+            m["missed_experimental_priority_rank"] = (
+                m["experimental_priority_score"].rank(method="first", ascending=False).astype(int)
+            )
+        else:
+            m["missed_experimental_priority_rank"] = m["missed_rank"]
+        missed_rank_map = dict(zip(m["candidate_id"], m["missed_rank"]))
+        missed_exp_map = dict(zip(m["candidate_id"], m["missed_experimental_priority_rank"]))
+
+    out["easy_rank"] = out["candidate_id"].map(easy_rank_map)
+    out["missed_rank"] = out["candidate_id"].map(missed_rank_map)
+    out["missed_experimental_priority_rank"] = out["candidate_id"].map(missed_exp_map)
+    easy_or_missed = out["easy_or_missed"] if "easy_or_missed" in out.columns else pd.Series("", index=out.index)
+
+    out["rank_shift_due_to_easy"] = np.where(
+        easy_or_missed.eq("missed"),
+        out["experimental_priority_rank"].fillna(out["rank"]) - out["missed_experimental_priority_rank"].fillna(np.nan),
+        0,
+    )
+    top_k = int(retrieval_cfg.get("top_n_export", 200))
+    out["is_top_in_missed"] = out["missed_experimental_priority_rank"].fillna(np.inf).le(top_k)
+    out["is_top_in_merged"] = out["experimental_priority_rank"].fillna(np.inf).le(top_k)
+    out["why_hidden_by_easy"] = np.where(
+        easy_or_missed.eq("missed") & out["is_top_in_missed"] & ~out["is_top_in_merged"],
+        (
+            "top_missed_but_hidden_by_easy:"
+            + out["rank_shift_due_to_easy"].fillna(0).astype(int).astype(str)
+            + "_positions"
+        ),
+        "",
+    )
+    return out
+
+
+def build_easy_and_missed_sets(
+    candidate_ids: list[str], mm_flags: pd.DataFrame, hmm_flags: pd.DataFrame
+) -> tuple[list[str], list[str]]:
+    """Build easy and missed candidate ID sets."""
+    flags = pd.DataFrame({"candidate_id": candidate_ids})
+    flags = flags.merge(mm_flags, on="candidate_id", how="left")
+    flags = flags.merge(hmm_flags, on="candidate_id", how="left")
+    flags["mmseqs_easy_hit_flag"] = flags["mmseqs_easy_hit_flag"].fillna(False).astype(bool)
+    flags["hmm_easy_hit_flag"] = flags["hmm_easy_hit_flag"].fillna(False).astype(bool)
+    flags["easy"] = flags["mmseqs_easy_hit_flag"] | flags["hmm_easy_hit_flag"]
+
+    easy_ids = flags.loc[flags["easy"], "candidate_id"].tolist()
+    missed_ids = flags.loc[~flags["easy"], "candidate_id"].tolist()
+    return easy_ids, missed_ids
+
+
+def decide_easy_hits(
+    candidate_ids: list[str],
+    mm_flags: pd.DataFrame,
+    hmm_flags: pd.DataFrame,
+    easy_cfg: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Decide easy hits with rule/profile/fraction guard while preserving legacy mode."""
+    base = pd.DataFrame({"candidate_id": candidate_ids})
+    base = base.merge(mm_flags, on="candidate_id", how="left")
+    base = base.merge(hmm_flags, on="candidate_id", how="left")
+
+    profile = _profile_name(easy_cfg)
+    rule = str(easy_cfg.get("decision_rule", "or")).lower()
+    max_easy_fraction = float(easy_cfg.get("max_easy_fraction", 1.0))
+    fallback = str(easy_cfg.get("fallback_if_too_many_easy", "warn_only")).lower()
+    calibrate = bool(easy_cfg.get("calibrate", False)) or rule == "calibrated"
+    ordered_profiles = ["loose", "balanced", "strict"]
+
+    def apply_rule(profile_name: str) -> pd.Series:
+        mm_prof = _series_bool(base, f"mmseqs_hit_{profile_name}", False)
+        hmm_prof = _series_bool(base, f"hmm_hit_{profile_name}", False)
+        mm_strict = _series_bool(base, "mmseqs_hit_strict", False)
+        hmm_strict = _series_bool(base, "hmm_hit_strict", False)
+        if rule == "and":
+            return mm_prof & hmm_prof
+        if rule in {"consensus", "calibrated"}:
+            return (mm_prof & hmm_prof) | (mm_strict & ~hmm_prof) | (hmm_strict & ~mm_prof)
+        return mm_prof | hmm_prof
+
+    candidate_profiles = ordered_profiles[ordered_profiles.index(profile):] if profile in ordered_profiles else [profile]
+    selected_profile = profile if profile in ordered_profiles else "balanced"
+    easy = apply_rule(selected_profile)
+
+    if calibrate or easy.mean() > max_easy_fraction:
+        for prof in candidate_profiles:
+            trial = apply_rule(prof)
+            if trial.mean() <= float(easy_cfg.get("target_easy_fraction_max", max_easy_fraction)):
+                selected_profile = prof
+                easy = trial
+                break
+        else:
+            if fallback == "tighten":
+                selected_profile = "strict"
+                easy = apply_rule("strict")
+
+    if easy.mean() > max_easy_fraction and fallback == "demote_to_missed":
+        strength = np.maximum(
+            _series_float(base, f"mmseqs_strength_{selected_profile}", 0.0),
+            _series_float(base, f"hmm_strength_{selected_profile}", 0.0),
+        )
+        keep_n = int(np.floor(max_easy_fraction * len(base)))
+        keep_n = max(0, min(keep_n, int(easy.sum())))
+        if keep_n < int(easy.sum()):
+            keep_ids = base.loc[easy].assign(_strength=strength[easy].values).sort_values("_strength", ascending=False).head(keep_n)["candidate_id"]
+            easy = base["candidate_id"].isin(keep_ids)
+
+    mm_prof = _series_bool(base, f"mmseqs_hit_{selected_profile}", False)
+    hmm_prof = _series_bool(base, f"hmm_hit_{selected_profile}", False)
+    mm_strict = _series_bool(base, "mmseqs_hit_strict", False)
+    hmm_strict = _series_bool(base, "hmm_hit_strict", False)
+
+    base["mmseqs_easy_hit_flag"] = mm_prof
+    base["hmm_easy_hit_flag"] = hmm_prof
+    base["easy_hit_flag"] = easy.astype(bool)
+    base["easy_confidence_class"] = np.select(
+        [mm_prof & hmm_prof, mm_strict & ~hmm_prof, hmm_strict & ~mm_prof],
+        ["both_support", "mmseqs_strict_only", "hmm_strict_only"],
+        default="not_easy",
+    )
+    base["easy_reason"] = np.select(
+        [mm_prof & hmm_prof, mm_strict & ~hmm_prof, hmm_strict & ~mm_prof],
+        [
+            f"{rule}:{selected_profile}:both",
+            f"{rule}:strict:mmseqs_only",
+            f"{rule}:strict:hmm_only",
+        ],
+        default=f"{rule}:{selected_profile}:missed",
+    )
+    base["easy_strength_score"] = np.maximum(
+        _series_float(base, f"mmseqs_strength_{selected_profile}", 0.0),
+        _series_float(base, f"hmm_strength_{selected_profile}", 0.0),
+    )
+
+    both_easy = int((easy & mm_prof & hmm_prof).sum())
+    mm_only_easy = int((easy & mm_strict & ~hmm_prof).sum())
+    hmm_only_easy = int((easy & hmm_strict & ~mm_prof).sum())
+    diagnostics = {
+        "decision_rule": rule,
+        "profile_requested": profile,
+        "profile_used": selected_profile,
+        "total_candidates": int(len(base)),
+        "easy_count": int(easy.sum()),
+        "missed_count": int((~easy).sum()),
+        "easy_fraction": float(easy.mean()) if len(base) else 0.0,
+        "mmseqs_only_easy": mm_only_easy,
+        "hmm_only_easy": hmm_only_easy,
+        "both_easy": both_easy,
+        "exceeds_max_easy_fraction": bool((float(easy.mean()) if len(base) else 0.0) > max_easy_fraction),
+        "fallback_if_too_many_easy": fallback,
+        "calibrate": calibrate,
+    }
+    return base, diagnostics
+
+
+def rank_missed_candidates(
+    missed_ids: list[str],
+    unlabeled_ids: list[str],
+    unlabeled_emb: np.ndarray,
+    lengths: dict[str, int],
+    prototypes: dict[int, np.ndarray],
+    medoids_df: pd.DataFrame,
+    mm_best: pd.DataFrame,
+    hmm_best: pd.DataFrame,
+    score_cfg: dict,
+) -> pd.DataFrame:
+    """Backward-compatible missed ranking entry (heuristic-only fallback)."""
+    if len(missed_ids) == 0:
+        return pd.DataFrame()
+
+    # Build pseudo positive labels from prototypes if needed.
+    proto_ids = sorted(prototypes.keys())
+    positive_ids = medoids_df["medoid_id"].tolist() if not medoids_df.empty else [f"cluster_{x}" for x in proto_ids]
+    positive_emb = np.vstack([prototypes[k] for k in proto_ids])
+    positive_labels = np.arange(len(proto_ids), dtype=int)
+
+    feat_res = build_missed_candidate_features(
+        missed_ids=missed_ids,
+        unlabeled_ids=unlabeled_ids,
+        unlabeled_emb=unlabeled_emb,
+        positive_ids=positive_ids,
+        positive_emb=positive_emb,
+        positive_labels=positive_labels,
+        lengths=lengths,
+        medoids_df=medoids_df,
+        metadata_df=None,
+        mm_best=mm_best,
+        hmm_best=hmm_best,
+        cfg=score_cfg,
+    )
+    return apply_heuristic_scorer(feat_res.features, score_cfg).scored
+
+
+def rank_candidates_with_policy(
+    candidate_ids: list[str],
+    easy_ids: list[str],
+    missed_ids: list[str],
+    mm_best: pd.DataFrame,
+    hmm_best: pd.DataFrame,
+    mm_flags: pd.DataFrame,
+    hmm_flags: pd.DataFrame,
+    feature_result: FeatureBuildResult,
+    retrieval_cfg: dict[str, Any],
+    scorer_mode: str = "heuristic",
+    train_feature_df: pd.DataFrame | None = None,
+    train_labels: np.ndarray | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
+    """Rank easy + missed candidates with configurable scorer and merge policy."""
+    # Respect upstream split explicitly; avoid recomputing semantic split silently.
+    cand_set = set(candidate_ids)
+    easy_ids = [x for x in easy_ids if x in cand_set]
+    missed_ids = [x for x in missed_ids if x in cand_set]
+
+    easy_df = build_easy_rank_table(easy_ids, mm_best, hmm_best, mm_flags, hmm_flags)
+
+    missed_feature_df = feature_result.features.copy()
+    if not missed_feature_df.empty:
+        missed_feature_df = missed_feature_df[missed_feature_df["candidate_id"].isin(missed_ids)].copy()
+
+    if missed_feature_df.empty:
+        missed_df = pd.DataFrame(columns=["candidate_id", "final_score", "rank", "scoring_mode", "easy_or_missed"])
+        fi = None
+    else:
+        if scorer_mode == "learned" and train_feature_df is not None and train_labels is not None:
+            try:
+                scored_res: ScoringResult = apply_learned_scorer(
+                    missed_feature_df,
+                    train_feature_df,
+                    train_labels,
+                    retrieval_cfg,
+                )
+            except Exception:
+                scored_res = apply_heuristic_scorer(missed_feature_df, retrieval_cfg)
+        else:
+            scored_res = apply_heuristic_scorer(missed_feature_df, retrieval_cfg)
+
+        missed_df = scored_res.scored.copy()
+        missed_df["easy_or_missed"] = "missed"
+        fi = scored_res.feature_importance
+
+    combined = _merge_easy_and_missed(easy_df, missed_df, retrieval_cfg)
+
+    for col, default in [
+        ("false_positive_risk", 0.0),
+        ("generic_mco_risk_score", 0.0),
+        ("embedding_similarity", np.nan),
+        ("positive_support_score", np.nan),
+        ("local_density_score", np.nan),
+        ("novelty_score", np.nan),
+    ]:
+        if col not in combined.columns:
+            combined[col] = default
+
+    combined = combined.drop_duplicates("candidate_id", keep="first").reset_index(drop=True)
+    combined["rank"] = np.arange(1, len(combined) + 1)
+
+    # Experimental priority rank: score-aware but risk-penalized triage index.
+    pcfg = retrieval_cfg.get("experimental_priority", {}) if isinstance(retrieval_cfg, dict) else {}
+    w_fp = float(pcfg.get("w_false_positive_risk", 0.20))
+    w_gr = float(pcfg.get("w_generic_mco_risk", 0.10))
+    easy_bonus = float(pcfg.get("easy_hit_bonus", 0.03))
+    high_conf_bonus = float(pcfg.get("high_confidence_bonus", 0.02))
+    if "final_score" in combined.columns:
+        exp_priority = combined["final_score"].fillna(0.0).astype(float)
+        if "false_positive_risk" in combined.columns:
+            exp_priority = exp_priority - w_fp * combined["false_positive_risk"].fillna(0.0).astype(float)
+        if "generic_mco_risk_score" in combined.columns:
+            exp_priority = exp_priority - w_gr * combined["generic_mco_risk_score"].fillna(0.0).astype(float)
+        if "easy_or_missed" in combined.columns:
+            exp_priority = exp_priority + easy_bonus * combined["easy_or_missed"].fillna("").eq("easy").astype(float)
+        if "confidence_tier" in combined.columns:
+            exp_priority = exp_priority + high_conf_bonus * combined["confidence_tier"].fillna("").eq("high").astype(float)
+        exp_priority = pd.Series(exp_priority, index=combined.index)
+        pmin, pmax = float(exp_priority.min()), float(exp_priority.max())
+        if pmax - pmin > 1e-12:
+            exp_priority = (exp_priority - pmin) / (pmax - pmin)
+        else:
+            exp_priority = pd.Series(np.clip(exp_priority, 0.0, 1.0), index=combined.index)
+        combined["experimental_priority_score"] = exp_priority
+        combined["experimental_priority_rank"] = (
+            combined["experimental_priority_score"].rank(method="first", ascending=False).astype(int)
+        )
+    else:
+        combined["experimental_priority_score"] = np.nan
+        combined["experimental_priority_rank"] = combined["rank"]
+
+    combined = _add_split_view_columns(combined, easy_df, missed_df, retrieval_cfg)
+    return combined, missed_feature_df, fi
+
+
+def export_top_candidates(
+    ranked_df: pd.DataFrame,
+    seqs: dict[str, str],
+    out_dir: str | Path,
+    top_n: int,
+) -> None:
+    """Export top candidates FASTA globally and by nearest cluster."""
+    out_dir = Path(out_dir)
+    if "experimental_priority_rank" in ranked_df.columns:
+        top = ranked_df.sort_values("experimental_priority_rank", ascending=True).head(top_n)
+    elif "rank" in ranked_df.columns:
+        top = ranked_df.sort_values("rank", ascending=True).head(top_n)
+    else:
+        top = ranked_df.sort_values("final_score", ascending=False).head(top_n)
+
+    records = [SeqRecord(Seq(seqs[cid]), id=cid, description="") for cid in top["candidate_id"] if cid in seqs]
+    write_fasta_records(records, out_dir / "top_candidates.fasta")
+    top.to_csv(out_dir / "top_candidates_experimental.csv", index=False)
+
+    by_cluster_dir = out_dir / "top_candidates_by_cluster"
+    by_cluster_dir.mkdir(parents=True, exist_ok=True)
+    cluster_col = "nearest_positive_cluster" if "nearest_positive_cluster" in top.columns else None
+    if cluster_col:
+        for cluster_id, sub in top.groupby(cluster_col):
+            recs = [SeqRecord(Seq(seqs[cid]), id=cid, description="") for cid in sub["candidate_id"] if cid in seqs]
+            write_fasta_records(recs, by_cluster_dir / f"cluster_{cluster_id}.fasta")
+
+
+def _remote_hmm_support_score(df: pd.DataFrame, remote_cfg: dict[str, Any]) -> pd.Series:
+    hmm_cfg = remote_cfg.get("hmm_support", {})
+    if not bool(hmm_cfg.get("enabled", True)):
+        return pd.Series(0.0, index=df.index)
+    evalue_ok = pd.to_numeric(df.get("hmm_best_evalue", pd.Series(np.inf, index=df.index)), errors="coerce").fillna(np.inf)
+    bits = pd.to_numeric(df.get("hmm_best_bitscore", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+    e_thr = float(hmm_cfg.get("evalue_max", 1e-3))
+    b_thr = float(hmm_cfg.get("bitscore_min", 0.0))
+    e_score = (-np.log10(evalue_ok.clip(lower=1e-300)) / max(-np.log10(e_thr), 1e-9)).clip(0.0, 1.0)
+    b_score = (bits / max(b_thr, 1.0)).clip(0.0, 1.0) if b_thr > 0 else (bits > 0).astype(float)
+    return np.maximum(e_score, b_score)
+
+
+def build_remote_candidate_pool(
+    ranked_df: pd.DataFrame,
+    remote_cfg: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any], pd.DataFrame]:
+    """Filter ranked candidates into remote discovery space using hard constraints."""
+    if ranked_df.empty:
+        empty_diag = {
+            "total_candidates": 0,
+            "remote_candidates": 0,
+            "remote_fraction": 0.0,
+            "filtered_by_identity": 0,
+            "filtered_by_qcov": 0,
+            "filtered_by_tcov": 0,
+            "filtered_by_easy": 0,
+            "filtered_by_hmm_support": 0,
+            "identity_distribution_summary": {},
+            "novelty_distribution_summary": {},
+        }
+        return ranked_df.copy(), empty_diag, pd.DataFrame()
+
+    df = ranked_df.copy()
+    identity_max = float(remote_cfg.get("identity_max", 0.30))
+    qcov_min = float(remote_cfg.get("qcov_min", 0.60))
+    tcov_min = float(remote_cfg.get("tcov_min", 0.60))
+    require_missed_only = bool(remote_cfg.get("require_missed_only", True))
+    hmm_cfg = remote_cfg.get("hmm_support", {})
+
+    df["best_identity_to_positive"] = pd.to_numeric(df.get("mmseqs_best_fident", np.nan), errors="coerce")
+    df["max_identity_to_positives"] = df["best_identity_to_positive"]
+    df["identity_penalty"] = (df["best_identity_to_positive"].fillna(1.0) / max(identity_max, 1e-9)).clip(0.0, 1.0)
+    df["hmm_support_score"] = _remote_hmm_support_score(df, remote_cfg)
+
+    pass_identity = df["best_identity_to_positive"].fillna(1.0) < identity_max
+    pass_qcov = pd.to_numeric(df.get("mmseqs_best_qcov", np.nan), errors="coerce").fillna(0.0) >= qcov_min
+    pass_tcov = pd.to_numeric(df.get("mmseqs_best_tcov", np.nan), errors="coerce").fillna(0.0) >= tcov_min
+    pass_easy = (~df.get("easy_or_missed", pd.Series("missed", index=df.index)).fillna("missed").eq("easy")) if require_missed_only else pd.Series(True, index=df.index)
+    pass_hmm = (
+        pd.to_numeric(df.get("hmm_best_evalue", np.nan), errors="coerce").fillna(np.inf) <= float(hmm_cfg.get("evalue_max", 1e-3))
+    ) | (
+        pd.to_numeric(df.get("hmm_best_bitscore", np.nan), errors="coerce").fillna(0.0) >= float(hmm_cfg.get("bitscore_min", 0.0))
+    )
+    if not bool(hmm_cfg.get("enabled", True)) or bool(hmm_cfg.get("use_as_soft_support", True)):
+        pass_hmm = pd.Series(True, index=df.index)
+
+    df["remote_pass_identity"] = pass_identity
+    df["remote_pass_qcov"] = pass_qcov
+    df["remote_pass_tcov"] = pass_tcov
+    df["remote_pass_easy"] = pass_easy
+    df["remote_pass_hmm_support"] = pass_hmm
+    df["remote_candidate"] = pass_identity & pass_qcov & pass_tcov & pass_easy & pass_hmm
+    df["remote_filter_drop_reason"] = np.select(
+        [
+            ~pass_identity,
+            pass_identity & ~pass_qcov,
+            pass_identity & pass_qcov & ~pass_tcov,
+            pass_identity & pass_qcov & pass_tcov & ~pass_easy,
+            pass_identity & pass_qcov & pass_tcov & pass_easy & ~pass_hmm,
+        ],
+        ["identity", "qcov", "tcov", "easy", "hmm_support"],
+        default="kept",
+    )
+
+    remote_df = df[df["remote_candidate"]].copy()
+    diag = {
+        "total_candidates": int(len(df)),
+        "remote_candidates": int(len(remote_df)),
+        "remote_fraction": float(len(remote_df) / max(len(df), 1)),
+        "filtered_by_identity": int((~pass_identity).sum()),
+        "filtered_by_qcov": int((pass_identity & ~pass_qcov).sum()),
+        "filtered_by_tcov": int((pass_identity & pass_qcov & ~pass_tcov).sum()),
+        "filtered_by_easy": int((pass_identity & pass_qcov & pass_tcov & ~pass_easy).sum()),
+        "filtered_by_hmm_support": int((pass_identity & pass_qcov & pass_tcov & pass_easy & ~pass_hmm).sum()),
+        "identity_distribution_summary": df["best_identity_to_positive"].describe().fillna(0.0).to_dict(),
+        "novelty_distribution_summary": pd.to_numeric(df.get("novelty_score", pd.Series(0.0, index=df.index)), errors="coerce").describe().fillna(0.0).to_dict(),
+    }
+
+    bins = [-np.inf, 0.10, 0.20, 0.30, 0.40, np.inf]
+    labels = ["0-0.10", "0.10-0.20", "0.20-0.30", "0.30-0.40", ">0.40"]
+    work = df.copy()
+    work["identity_bin"] = pd.cut(work["best_identity_to_positive"].fillna(np.inf), bins=bins, labels=labels)
+    identity_bins = work.groupby("identity_bin", dropna=False).agg(
+        candidate_count=("candidate_id", "count"),
+        mean_novelty=("novelty_score", "mean"),
+        mean_embedding_similarity=("embedding_similarity", "mean"),
+        mean_false_positive_risk=("false_positive_risk", "mean"),
+    ).reset_index()
+    return remote_df, diag, identity_bins
+
+
+def compute_remote_score(remote_df: pd.DataFrame, remote_cfg: dict[str, Any]) -> pd.DataFrame:
+    """Compute remote-discovery score inside filtered remote space."""
+    if remote_df.empty:
+        return remote_df.copy()
+    rcfg = remote_cfg.get("ranking", {})
+    out = remote_df.copy()
+    out["remote_score"] = (
+        float(rcfg.get("w_affinity", 0.35)) * pd.to_numeric(out.get("embedding_similarity", 0.0), errors="coerce").fillna(0.0)
+        + float(rcfg.get("w_positive_support", 0.20)) * pd.to_numeric(out.get("positive_support_score", 0.0), errors="coerce").fillna(0.0)
+        + float(rcfg.get("w_local_density", 0.15)) * pd.to_numeric(out.get("local_density_score", 0.0), errors="coerce").fillna(0.0)
+        + float(rcfg.get("w_novelty", 0.30)) * pd.to_numeric(out.get("novelty_score", 0.0), errors="coerce").fillna(0.0)
+        + float(rcfg.get("w_hmm_support", 0.05)) * pd.to_numeric(out.get("hmm_support_score", 0.0), errors="coerce").fillna(0.0)
+        - abs(float(rcfg.get("w_false_positive_risk", -0.15))) * pd.to_numeric(out.get("false_positive_risk", 0.0), errors="coerce").fillna(0.0)
+        - abs(float(rcfg.get("w_identity_penalty", -0.20))) * pd.to_numeric(out.get("identity_penalty", 0.0), errors="coerce").fillna(0.0)
+    )
+    return out
+
+
+def rank_remote_candidates(remote_df: pd.DataFrame, remote_cfg: dict[str, Any]) -> pd.DataFrame:
+    """Rank candidates in the remote discovery space only."""
+    out = compute_remote_score(remote_df, remote_cfg)
+    if out.empty:
+        out["remote_rank"] = pd.Series(dtype=int)
+        return out
+    out = out.sort_values("remote_score", ascending=False).reset_index(drop=True)
+    out["remote_rank"] = np.arange(1, len(out) + 1)
+    out["experimental_priority_rank"] = out["remote_rank"]
+    return out
+
+
+def evaluate_remote_only(
+    rank_ids: list[str],
+    true_set: set[str],
+    remote_ids: set[str],
+    k_values: list[int],
+) -> dict[str, float]:
+    """Evaluate ranking restricted to remote candidate pool."""
+    remote_rank_ids = [rid for rid in rank_ids if rid in remote_ids]
+    true_remote = true_set & remote_ids
+    if len(true_remote) == 0:
+        row = {"mrr": np.nan}
+        for k in k_values:
+            row[f"recall@{k}"] = np.nan
+            row[f"ef@{k}"] = np.nan
+        return row
+    return {
+        "mrr": next((1.0 / i for i, sid in enumerate(remote_rank_ids, 1) if sid in true_remote), 0.0),
+        **{
+            f"recall@{k}": sum(1 for i in remote_rank_ids[:k] if i in true_remote) / max(1, len(true_remote))
+            for k in k_values
+        },
+        **{
+            f"ef@{k}": (
+                sum(1 for i in remote_rank_ids[:k] if i in true_remote)
+                / max(k * (len(true_remote) / max(1, len(remote_rank_ids))), 1e-9)
+            )
+            for k in k_values
+        },
+    }

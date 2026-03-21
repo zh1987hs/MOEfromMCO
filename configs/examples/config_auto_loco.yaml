@@ -1,0 +1,74 @@
+input:
+  positives_fasta: "positives.fasta"
+  unlabeled_fasta: "unlabeled_mco.fasta"
+positives:
+  fasta: "positives.fasta"
+  metadata_csv: null
+output:
+  base_dir: "runs"
+random_seed: 42
+qc:
+  min_len: 250
+  max_len: 2000
+  check_motif: false
+esm:
+  model_name: "facebook/esm2_t33_650M_UR50D"
+  batch_size: 8
+  pooling: "mean"
+  device: null
+  shard_size: 5000
+positive_clustering:
+  mode: "auto"
+  fixed_cluster_csv: null
+  methods: ["agglomerative", "kmeans"]
+  k_min: 3
+  k_max: 10
+prototype:
+  representative: "prototype"
+  use_tier_weights: false
+  gold_weight: 1.0
+  silver_weight: 1.0
+mmseqs:
+  threads: 16
+  sensitivity: 7.5
+  max_seqs: 50
+  evalue: 1.0e-3
+  top_n: 5
+  tmp_dir: "mmseqs_tmp"
+hmmer:
+  msa_tool: "mafft"
+  threads: 16
+  evalue: 1.0e-3
+easy_hit:
+  mmseqs:
+    fident_min: 0.30
+    qcov_min: 0.70
+    evalue_max: 1.0e-5
+  hmm:
+    evalue_max: 1.0e-5
+    bitscore_min: 50.0
+retrieval:
+  scorer: "heuristic"
+  affinity_metric: "cosine"
+  easy_hit_policy: "prepend"
+  support_topk: 5
+  density_knn_k: 10
+  novelty_cap: 0.9
+  heuristic:
+    w_affinity: 0.75
+    w_positive_support: 0.15
+    w_local_density: 0.08
+    w_novelty: 0.02
+  learned:
+    enabled: true
+    model_type: "logistic"
+    negative_background_n: 5000
+    standardize_features: true
+    use_hard_negatives: true
+  top_n_export: 200
+evaluation:
+  mode: "loco"
+  leakage_guard: true
+cv:
+  background_n: 5000
+  k_values: [10, 20, 50, 100]

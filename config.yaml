@@ -1,0 +1,179 @@
+input:
+  positives_fasta: "positives.fasta"          # backward compatibility
+  unlabeled_fasta: "unlabeled_mco.fasta"
+
+positives:
+  fasta: "positives.fasta"
+  metadata_csv: null
+
+output:
+  base_dir: "runs"
+
+random_seed: 42
+
+qc:
+  min_len: 250
+  max_len: 2000
+  check_motif: false
+
+esm:
+  model_name: "facebook/esm2_t33_650M_UR50D"
+  batch_size: 8
+  pooling: "mean"
+  device: null
+  shard_size: 5000
+
+positive_clustering:
+  mode: "auto"                               # fixed | auto | none
+  fixed_cluster_csv: null
+  methods: ["agglomerative", "kmeans"]
+  k_min: 3
+  k_max: 10
+
+clustering:
+  methods: ["agglomerative", "kmeans"]      # legacy compatibility
+  k_min: 3
+  k_max: 10
+
+prototype:
+  representative: "prototype"
+  use_tier_weights: false
+  gold_weight: 1.0
+  silver_weight: 1.0
+
+mmseqs:
+  threads: 16
+  sensitivity: 7.5
+  max_seqs: 50
+  evalue: 1.0e-3
+  top_n: 5
+  tmp_dir: "mmseqs_tmp"
+
+hmmer:
+  msa_tool: "mafft"
+  threads: 16
+  evalue: 1.0e-3
+
+easy_hit:
+  decision_rule: "consensus"   # or | and | consensus | calibrated
+  profile: "balanced"          # loose | balanced | strict
+  max_easy_fraction: 0.30
+  fallback_if_too_many_easy: "tighten"   # tighten | demote_to_missed | warn_only
+  calibrate: true
+  calibration_objective: "precision_at_easy"
+  target_easy_precision: 0.95
+  target_easy_fraction_max: 0.30
+  negative_source: "background"
+  mmseqs:
+    loose:
+      fident_min: 0.30
+      qcov_min: 0.70
+      tcov_min: 0.70
+      evalue_max: 1.0e-5
+    balanced:
+      fident_min: 0.35
+      qcov_min: 0.80
+      tcov_min: 0.80
+      evalue_max: 1.0e-10
+    strict:
+      fident_min: 0.40
+      qcov_min: 0.80
+      tcov_min: 0.80
+      evalue_max: 1.0e-20
+  hmm:
+    use_curated_cutoffs_if_present: true
+    loose:
+      full_seq_evalue_max: 1.0e-5
+      bitscore_min: 50.0
+      hmm_cov_min: 0.35
+    balanced:
+      full_seq_evalue_max: 1.0e-10
+      bitscore_min: 80.0
+      hmm_cov_min: 0.35
+    strict:
+      full_seq_evalue_max: 1.0e-15
+      bitscore_min: 100.0
+      hmm_cov_min: 0.50
+
+retrieval:
+  scorer: "heuristic"              # heuristic | learned
+  affinity_metric: "cosine"
+  easy_hit_policy: "prepend"       # prepend | merge | interleave | prepend_with_cap
+  experimental_view_mode: "merged" # merged | missed_only | split_outputs | remote_only
+  cv_view_mode: "both"             # merged | missed_only | remote_only | both
+  export_easy_only: true
+  export_missed_only: true
+  easy_prepend_cap: 200
+  support_topk: 5
+  density_knn_k: 10
+  novelty_cap: 0.90
+
+  risk:
+    w_generic_density: 0.45
+    w_generic_low_support: 0.35
+    w_generic_weak_homology: 0.20
+    w_fp_generic: 0.40
+    w_fp_low_support: 0.25
+    w_fp_novelty_mismatch: 0.20
+    w_fp_low_affinity: 0.15
+    flag_generic_boost: 0.10
+    flag_length_boost: 0.08
+    flag_close_boost: 0.06
+
+  experimental_priority:
+    w_false_positive_risk: 0.20
+    w_generic_mco_risk: 0.10
+    easy_hit_bonus: 0.03
+    high_confidence_bonus: 0.02
+
+  # legacy fields (still read)
+  distance_metric: "cosine"
+  knn_k: 20
+  w_affinity: 0.60
+  w_novelty: 0.25
+  w_local_support: 0.15
+
+  heuristic:
+    w_affinity: 0.75
+    w_positive_support: 0.15
+    w_local_density: 0.08
+    w_novelty: 0.02
+
+  learned:
+    enabled: true
+    model_type: "logistic"
+    negative_background_n: 5000
+    standardize_features: true
+    use_hard_negatives: true
+
+  top_n_export: 200
+
+remote_discovery:
+  enabled: true
+  identity_max: 0.30
+  qcov_min: 0.60
+  tcov_min: 0.60
+  require_missed_only: true
+
+  ranking:
+    mode: "remote_score"
+    w_affinity: 0.45
+    w_positive_support: 0.25
+    w_local_density: 0.10
+    w_novelty: 0.15
+    w_false_positive_risk: -0.15
+    w_identity_penalty: -0.05
+    w_hmm_support: 0.10
+
+  export:
+    top_n: 200
+    make_fasta: true
+    make_experimental_csv: true
+
+evaluation:
+  mode: "loco"                        # loco | leave_one_gold_family_out
+  leakage_guard: true
+
+cv:
+  background_n: 5000
+  k_values: [10, 20, 50, 100]
