@@ -1,55 +1,50 @@
 # MnOx MCO Candidate Prioritization Pipeline
 
-**A remote-homology-guided candidate prioritization pipeline for putative Mn(II)-oxidizing MCO discovery.**
+This repository provides **a remote-homology-guided candidate prioritization pipeline for putative Mn(II)-oxidizing MCO discovery**. It is designed to help users prioritize candidate proteins for downstream experimental follow-up rather than to assign definitive function. The workflow supports both high-confidence neighbor expansion and remote discovery in low-identity sequence space. It also includes family-aware cross-validation and a ranking robustness analysis tool for post hoc inspection of remote-only candidates.
 
-This repository provides a reproducible workflow for prioritizing putative Mn(II)-oxidizing multicopper oxidase (MCO) candidates for follow-up experiments. It supports both high-confidence neighbor expansion and remote discovery in low-identity space, and it includes family-aware cross-validation plus a post hoc ranking robustness analysis tool.
+## 1. What this repository does
 
-The pipeline is intended for **candidate prioritization**, not definitive functional annotation.
+This pipeline supports:
 
-## 1. Key capabilities
-
-### High-confidence neighbor expansion
-- Detects strong easy-hit candidates using MMseqs2 and HMM support.
-- Produces merged, easy-only, and missed-only views for traditional homolog expansion.
-
-### Remote discovery in low-identity space
-- Defines a remote candidate space using sequence identity and coverage thresholds.
-- Ranks candidates inside that remote-only space using embedding, support, density, novelty, and risk features.
-- Exposes remote-only outputs intended for experimental prioritization.
+- **High-confidence neighbor expansion** using easy-hit logic from sequence-homology tools.
+- **Remote discovery** in low-identity sequence space using explicit sequence gates plus embedding-based ranking.
+- **Family-aware evaluation** to reduce leakage between closely related positive groups.
+- **Candidate ranking robustness analysis** for remote-only candidates using repeated weight perturbation.
 
 ## 2. Repository structure
 
-| Path | Role |
+| Path | What it does |
 |---|---|
-| `run_pipeline.py` | Main end-to-end pipeline driver. |
-| `config.yaml` | Default configuration for inputs, embedding, clustering, retrieval, remote discovery, and CV. |
-| `mnox/` | Core library code: embedding, clustering, MMseqs/HMM wrappers, feature building, retrieval, scoring, CV, plotting, and utilities. |
-| `configs/examples/` | Example configuration files for common workflows such as auto clustering and fixed family-aware CV. |
-| `scripts/stability_remote_candidates.py` | CLI tool for remote-only candidate ranking robustness analysis. |
-| `tests/` | Lightweight unit and smoke tests for retrieval and stability-analysis logic. |
+| `run_pipeline.py` | Main entry point for the end-to-end pipeline. |
+| `config.yaml` | Default configuration for inputs, embedding, clustering, retrieval, remote discovery, exports, and CV. |
+| `mnox/` | Core implementation package: embedding, clustering, MMseqs/HMM wrappers, feature construction, retrieval, scoring, CV, plotting, and utilities. |
+| `configs/examples/` | Example configurations for common modes such as auto clustering and fixed family-aware evaluation. |
+| `scripts/stability_remote_candidates.py` | Recommended post-processing CLI for remote-only candidate ranking robustness analysis. |
+| `tests/` | Lightweight tests for retrieval logic and stability-analysis behavior. |
 
 ## 3. Required input files
 
 | File | Required? | Purpose | Expected format / key columns |
 |---|---|---|---|
-| Positive FASTA | Required | Positive reference set used for retrieval, clustering, and support signals. | FASTA; sequence IDs must be stable across metadata and optional fixed clusters. |
-| Unlabeled MCO FASTA | Required | Candidate search space to rank. | FASTA of unlabeled candidate proteins. |
-| Positive metadata CSV | Optional but strongly recommended | Supplies tiers and family labels for family-aware CV and interpretation. | CSV with `positive_id,tier,gold_family,seed_gold_id`. |
-| Fixed positive cluster CSV | Optional | Supplies pre-defined positive clusters for fair model comparison or fixed cluster analysis. | CSV with `positive_id,cluster`. |
+| Positive FASTA | Required | Positive reference set used for clustering, homology search, support features, and evaluation. | FASTA; sequence identifiers must be stable across optional metadata and fixed-cluster files. |
+| Unlabeled MCO FASTA | Required | Candidate search space to rank. | FASTA of unlabeled MCO-like proteins. |
+| Positive metadata CSV | Optional, strongly recommended | Supplies tier labels and family labels for interpretation and family-aware CV. | CSV with `positive_id,tier,gold_family,seed_gold_id`. |
+| Fixed positive cluster CSV | Optional | Supplies pre-defined positive clusters for fixed-cluster workflows or model-comparison studies. | CSV with `positive_id,cluster`. |
 
-In the default configuration these correspond to:
+Typical default filenames in `config.yaml` are:
+
 - `positives.fasta`
 - `unlabeled_mco.fasta`
-- optional `metadata_csv`
+- optional metadata CSV
 - optional `positive_clusters_fixed.csv`
 
-## 4. Input preparation guidance
+## 4. Input preparation
 
 ### Gold positives
-Use experimentally supported MnOx-related MCO sequences as the core positive set. These sequences should be the highest-confidence functional anchors in your study.
+Gold positives should be the strongest experimentally supported MnOx-related MCO sequences available to your study. These are the main anchors used for biological interpretation.
 
-### Silver / high-confidence positives
-You may include additional high-confidence homologs to broaden positive support and improve retrieval robustness, but keep track of which sequences are gold versus silver in the metadata.
+### High-confidence / expanded positives
+You may include additional high-confidence homologs as silver or expanded positives to broaden support and improve retrieval stability, but they should be clearly labeled in the metadata.
 
 ### Positive metadata CSV
 Recommended columns:
@@ -58,31 +53,33 @@ Recommended columns:
 positive_id,tier,gold_family,seed_gold_id
 ```
 
-- `positive_id`: must match FASTA identifiers exactly.
-- `tier`: typically `gold` or `silver`.
+- `positive_id`: must match the positive FASTA identifier exactly.
+- `tier`: usually `gold` or `silver`.
 - `gold_family`: family label used for family-aware CV.
-- `seed_gold_id`: original gold anchor associated with the sequence.
+- `seed_gold_id`: the original gold anchor associated with the sequence.
 
 ### Fixed cluster CSV
-If you want fixed positive clusters, provide:
+If you want fixed positive clusters, prepare:
 
 ```csv
 positive_id,cluster
 ```
 
-The IDs must match the positive FASTA and, if metadata is provided, the metadata CSV as well.
+This is most useful when comparing embedding models or when you want the clustering scheme to stay fixed across runs.
 
 ## 5. Quick start
 
-### Basic run
+### Minimal main pipeline command
 
 ```bash
 python run_pipeline.py
 ```
 
-### Remote discovery run
+Outputs are written to a timestamped subdirectory under the configured output base directory (default: `runs/`).
 
-Make sure `config.yaml` keeps remote discovery enabled and uses a remote-only experimental view:
+### Remote discovery example
+
+Make sure remote discovery is enabled and remote-only is the main experimental view:
 
 ```yaml
 remote_discovery:
@@ -102,12 +99,13 @@ Then run:
 python run_pipeline.py
 ```
 
-### Model comparison use case
+### Model comparison example
 
-For model comparison, a practical pattern is:
-- use `positive_clustering.mode: fixed`
-- use family-aware evaluation (`evaluation.mode: leave_one_gold_family_out`)
-- vary the embedding model in `esm.model_name`
+A practical model-comparison setup is:
+
+- `positive_clustering.mode: fixed`
+- `evaluation.mode: leave_one_gold_family_out`
+- vary `esm.model_name`
 
 Example:
 
@@ -115,68 +113,68 @@ Example:
 python run_pipeline.py
 ```
 
-In our current use case, a 150M-scale ESM2 model can be a strong practical comparison point, but it should be treated as an example rather than a universal recommendation.
+In our current use case, a 150M-scale ESM2 model was a strong practical choice for comparison, but that should be treated as an example rather than a universal recommendation.
 
 ## 6. Remote discovery workflow
 
-Remote discovery should be interpreted in three layers:
+Remote discovery in this repository follows a simple interpretation:
 
-1. **Sequence-homology gate defines the remote candidate space.**  
-   Candidates enter the remote-only space only if they satisfy the configured identity and coverage thresholds.
+1. **Sequence-homology gates define the remote candidate space.**<br>
+   Identity and coverage thresholds decide which candidates are considered truly remote.
 
-2. **ESM2 embeddings rank candidates within that remote space.**  
-   Once the gate is fixed, embedding similarity and related support features drive prioritization inside the remote-only pool.
+2. **ESM2 embeddings prioritize candidates within that remote space.**<br>
+   Once the gate is fixed, embedding similarity and related support features rank candidates inside the remote-only pool.
 
-3. **Remote-only outputs are the recommended view for remote candidate prioritization.**  
-   If `remote_discovery.enabled=true` and `retrieval.experimental_view_mode=remote_only`, the remote-only outputs are the main experiment-facing files.
+3. **Remote-only outputs are the recommended view for low-identity candidate discovery.**<br>
+   If `remote_discovery.enabled=true` and `retrieval.experimental_view_mode=remote_only`, the remote-only outputs are the primary files for remote candidate prioritization.
 
 ## 7. Main output files and how to interpret them
 
-### `ranked_candidates_remote_only.csv`
-The core remote-only ranked table. Use this to inspect all candidates that passed the remote gate.
+### Files mainly used for experimental candidate prioritization
 
-### `ranked_candidates_remote_experimental_view.csv`
-A more experiment-facing remote-only view with fields such as:
-- `remote_rank`
-- `candidate_id`
-- `nearest_positive_family`
-- `best_identity_to_positive`
-- support, density, novelty, HMM, and risk features
+#### `ranked_candidates_remote_only.csv`
+The main remote-only ranked table. Use it to inspect every candidate that passed the remote discovery gate.
 
-### `top_remote_candidates.csv` / `top_remote_candidates.fasta`
-Top-N remote-only candidates intended for quick review and downstream laboratory planning. `top_n` is controlled by `remote_discovery.export.top_n`.
+#### `ranked_candidates_remote_experimental_view.csv`
+A more experiment-facing remote-only table. This is usually the most convenient file for selecting remote candidates for follow-up.
 
-### `cv_summary.csv`
-Cross-validation summary across methods and views. For remote discovery, pay special attention to:
+#### `top_remote_candidates.csv`
+Top-N remote-only candidates in a compact CSV for quick review.
+
+#### `top_remote_candidates.fasta`
+FASTA export of the top remote-only candidates for downstream manual inspection or additional sequence analysis.
+
+### Files mainly used for evaluation
+
+#### `cv_summary.csv`
+Cross-validation results across methods and views. For remote discovery, pay particular attention to:
+
 - `evaluation_view = remote_only`
 
-### `ablation_summary.csv`
-Mean performance by evaluation view, method, and scoring mode. Useful for comparing heuristic, learned, and ablated variants.
+#### `ablation_summary.csv`
+Mean performance summaries by method, scoring mode, and evaluation view. Useful for comparing heuristic, learned, and ablated ranking variants.
 
-### `remote_discovery_diagnostics.json`
-Summary of how many candidates entered the remote pool and how many were filtered by identity, coverage, or easy-hit restrictions.
+### Files mainly used to understand the remote candidate space
 
-### `remote_identity_bins.csv`
-Identity-bin summary for the remote search space. Useful for checking whether candidate behavior changes across identity bands.
+#### `remote_discovery_diagnostics.json`
+Summary diagnostics for the remote pool, including how many candidates passed or failed the remote filters.
 
-### `remote_only_summary_by_family.csv`
-Family-level summary for `remote_only` evaluation. Particularly useful when reviewing:
-- `fold_gold_family`
-- `mrr`
-- `recall@20`, `recall@50`, `recall@100`
-- `n_holdout_pos_in_remote_space`
-- `remote_evaluable`
+#### `remote_identity_bins.csv`
+Identity-bin summary for the remote candidate space. Useful for checking whether behavior changes across identity ranges.
+
+#### `remote_only_summary_by_family.csv`
+Family-level remote-only summary that helps compare how methods behave on families with different amounts of remote holdout signal.
 
 ## 8. Candidate ranking robustness analysis
 
-The repository includes a CLI for ranking robustness analysis:
+The recommended post-processing step for remote-only candidates is:
 
 ```bash
 python scripts/stability_remote_candidates.py --run-dir runs/<timestamp>
 ```
 
-### What it does
-It perturbs the remote ranking weights around the current tuned baseline and asks which target-family candidates remain near the top across repeated reranking.
+### What the script does
+It perturbs the remote-score weights around the current tuned baseline and measures whether target-family candidates remain near the top across repeated reranking.
 
 ### Required input
 By default it reads:
@@ -206,63 +204,70 @@ python scripts/stability_remote_candidates.py \
 ```
 
 ### How to interpret the main columns
+
 - `top10_freq`, `top20_freq`, `top50_freq`: fraction of perturbation runs in which the candidate stays inside top-K.
 - `mean_rank`: average rank across perturbation runs.
-- `std_rank`: ranking stability; lower is more stable.
-- `best_rank`, `worst_rank`: optimistic and pessimistic ranking bounds under the tested perturbations.
+- `std_rank`: ranking stability; lower values indicate more stable rankings.
+- `best_rank`, `worst_rank`: optimistic and pessimistic rank bounds across the perturbation runs.
 
-As a practical rule, candidates with strong baseline ranks **and** good stability statistics are usually better first-round experimental choices than candidates that rank high only under a narrow set of weights.
+Why this is useful:
 
-## 9. Interpretation notes
+- a candidate that remains near the top under many small weight perturbations is usually a safer experimental priority than one that ranks high only under a narrow parameter setting;
+- stability analysis helps distinguish robust `mcoA-like` remote candidates from candidates that are highly sensitive to a single tuned scoring profile.
 
-- Top-ranked candidates are **not** definitive functional annotations.
-- Merged ranking and remote-only ranking answer different questions and should not be interpreted interchangeably.
-- Stability analysis is a tool for experimental prioritization, not functional proof.
+## 9. Recommended analysis workflow
 
-## 10. Optional advanced configuration
+A practical first-pass workflow is:
 
-Keep the following keys in mind:
-
-- `positive_clustering.mode`: `auto`, `fixed`, or `none`
-- `retrieval.scorer`: `heuristic` or `learned`
-- `retrieval.experimental_view_mode`: `merged`, `missed_only`, `split_outputs`, or `remote_only`
-- `evaluation.mode`: `loco` or `leave_one_gold_family_out`
-- `remote_discovery.*`: remote gate and remote ranking configuration
-- `remote_discovery.ranking.*`: tuned remote-score weights
-
-For advanced use, see:
-- `config.yaml`
-- `configs/examples/config_auto_loco.yaml`
-- `configs/examples/config_fixed_gold_family.yaml`
-
-## 11. Limitations
-
-- Risk scores are heuristic and interpretable, but they are not calibrated functional probabilities.
-- The learned scorer is a lightweight prioritization model, not a universal replacement for the heuristic path.
-- Remote-only CV is informative for remote discovery, but it should not be confused with overall merged-ranking performance.
-- Stability analysis helps identify candidates that are less sensitive to small weight changes, but it does not prove function.
-
-## 12. Minimal run checklist
-
-1. Prepare a positive FASTA and an unlabeled MCO FASTA.
-2. Optionally prepare metadata and fixed clusters.
-3. Update `config.yaml`.
-4. Run:
+1. Prepare positive FASTA, unlabeled MCO FASTA, and optional metadata / fixed clusters.
+2. Run the main pipeline:
 
 ```bash
 python run_pipeline.py
 ```
 
-5. Inspect:
-- `ranked_candidates_remote_only.csv`
-- `ranked_candidates_remote_experimental_view.csv`
-- `top_remote_candidates.csv`
-- `cv_summary.csv` with `evaluation_view = remote_only`
-
-6. Run robustness analysis:
+3. Inspect the remote-only outputs:
+   - `ranked_candidates_remote_only.csv`
+   - `ranked_candidates_remote_experimental_view.csv`
+   - `top_remote_candidates.csv`
+4. Compare CV results in `cv_summary.csv` and `ablation_summary.csv`, especially `evaluation_view = remote_only`.
+5. Run the robustness analysis:
 
 ```bash
 python scripts/stability_remote_candidates.py \
   --run-dir runs/<timestamp> \
   --target-family mcoA
 ```
+
+6. Select candidates for experimental validation using both the remote-only ranking and the robustness summary.
+
+## 10. Interpretation notes
+
+- Top-ranked candidates are **not** definitive annotations.
+- Merged ranking and remote-only ranking answer different questions and should not be interpreted interchangeably.
+- Robustness analysis is for experimental prioritization, not proof of function.
+- Family-aware CV should be interpreted separately from the final discovery ranking.
+
+## 11. Optional advanced configuration
+
+Important config keys to know without overloading the first-time user:
+
+- `positive_clustering.mode`: `auto`, `fixed`, or `none`
+- `retrieval.scorer`: `heuristic` or `learned`
+- `retrieval.experimental_view_mode`: `merged`, `missed_only`, `split_outputs`, or `remote_only`
+- `evaluation.mode`: `loco` or `leave_one_gold_family_out`
+- `remote_discovery.*`: remote gate and remote ranking settings
+- `remote_discovery.ranking.*`: remote-score weights used inside the remote-only candidate space
+
+Useful references:
+
+- `config.yaml`
+- `configs/examples/config_auto_loco.yaml`
+- `configs/examples/config_fixed_gold_family.yaml`
+
+## 12. Limitations
+
+- Performance can vary substantially across families.
+- Semantic shifts can occur when changing embedding model scale.
+- Remote-only CV is informative for low-identity discovery, but it should not be confused with overall merged-ranking behavior.
+- Stability analysis helps identify robust priorities, but experimental validation is still necessary.
