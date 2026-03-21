@@ -1,13 +1,177 @@
-# MnOx MCO candidate prioritization pipeline
+# MnOx MCO candidate prioritization pipeline / MnOx MCO 候选优先级流程
 
-本项目定位是：
-**remote-homology-guided candidate prioritization pipeline for putative Mn(II)-oxidizing MCO discovery**。
+## Project overview / 项目概述
 
-当前仓库支持两类目标：
-- **高置信近邻扩展**：优先利用 easy-hit / merged 排名快速扩展近邻同源候选。
-- **远缘发现（remote discovery）**：先用 identity / coverage 做硬门控，再只在 remote 子空间中排序。
+This repository provides a reproducible workflow for prioritizing putative Mn(II)-oxidizing multicopper oxidase (MCO) candidates, with special support for **remote discovery** and experiment-oriented triage.  
+本仓库提供一个可复现的 putative Mn(II)-oxidizing multicopper oxidase (MCO) 候选优先级分析流程，重点支持 **remote discovery（远缘发现）** 与实验优先级排序。
 
-> 重点是提升 top-K 候选（前10/20/50）实验筛选价值，而不是直接输出 definitive functional annotation。
+The pipeline is designed to improve **top-K experimental selection**, not to provide definitive functional annotation by itself.  
+该流程的目标是提升 **top-K 实验候选筛选效率**，而不是直接给出 definitive functional annotation。
+
+Current workflow supports two complementary use cases.  
+当前流程支持两类互补目标：
+
+- **Nearest-neighbor expansion / 近邻扩展**: use easy-hit / merged rankings to expand high-confidence close homologs.
+- **Remote discovery / 远缘发现**: define a distant candidate space by sequence identity/coverage gates, then rank candidates inside that remote-only space.
+
+## Recommended interpretation framework / 推荐解释框架
+
+For remote discovery, we recommend the following conceptual split.  
+对于 remote discovery，我们建议按以下框架理解结果：
+
+1. **Sequence alignment defines the remote candidate space / 序列比对定义 remote 候选空间**  
+   Identity and coverage thresholds determine which candidates are considered truly remote.
+2. **ESM2 embedding prioritizes candidates inside the remote space / ESM2 embedding 负责 remote 子空间内优先级排序**  
+   Embedding similarity and support features help rank distant candidates once the gate is fixed.
+3. **Stability analysis identifies robust candidates / 稳健性分析识别稳健候选**  
+   Perturbing ranking weights helps find candidates that stay near the top rather than being driven by a single lucky parameter setting.
+
+## Data preparation / 数据准备
+
+Prepare at least the following inputs.  
+至少准备以下输入文件：
+
+- `positives.fasta`: known or curated positive sequences.
+- `unlabeled_mco.fasta` (or your configured unlabeled FASTA): candidate search space.
+- Optional positive metadata CSV with columns:
+
+```csv
+positive_id,tier,gold_family,seed_gold_id
+```
+
+You can update the paths directly in `config.yaml`.  
+你可以直接在 `config.yaml` 中修改这些路径。
+
+## Running the main pipeline / 运行主流程
+
+### Basic run / 基础运行
+
+```bash
+python run_pipeline.py
+```
+
+### 150M tuned remote discovery example / 150M tuned remote discovery 示例
+
+Update `config.yaml` (or an example config) to use your desired ESM2 model and keep remote discovery enabled, then run:  
+将 `config.yaml`（或示例配置）切换到你希望使用的 ESM2 模型，并保持 remote discovery 开启，然后运行：
+
+```bash
+python run_pipeline.py
+```
+
+For example, you may switch `esm.model_name` to a larger ESM2 checkpoint such as a 150M-scale model and keep:  
+例如，你可以将 `esm.model_name` 切换到更大的 ESM2 checkpoint（如 150M 级别），并保持：
+
+```yaml
+remote_discovery:
+  enabled: true
+  identity_max: 0.30
+  qcov_min: 0.60
+  tcov_min: 0.60
+  require_missed_only: true
+```
+
+## Remote-only outputs / remote-only 关键输出
+
+When `remote_discovery.enabled=true` and `experimental_view_mode=remote_only`, the primary experiment-facing outputs come from the remote-only channel.  
+当 `remote_discovery.enabled=true` 且 `experimental_view_mode=remote_only` 时，主实验输出来自 remote-only 通道。
+
+Key files include:  
+关键文件包括：
+
+- `ranked_candidates_remote_only.csv`
+- `ranked_candidates_remote_experimental_view.csv`
+- `top_remote_candidates.csv`
+- `top_remote_candidates.fasta`
+
+Remote discovery is defined as candidates satisfying all of the following.  
+remote discovery 的定义是同时满足以下条件的候选：
+
+- `best_identity_to_positive < 0.30`
+- coverage thresholds pass (`qcov` and `tcov`)
+- search is restricted to missed-space candidates by default
+
+## How to read remote-only CV / 如何查看 remote_only CV
+
+`cv_summary.csv` contains an `evaluation_view` column.  
+`cv_summary.csv` 中包含 `evaluation_view` 列。
+
+For remote discovery, focus on rows where:  
+对于 remote discovery，重点查看：
+
+- `evaluation_view = remote_only`
+
+You can also inspect `remote_only_summary_by_family.csv` to compare family-level behavior using:  
+你也可以查看 `remote_only_summary_by_family.csv`，按 family 比较：
+
+- `mrr`
+- `recall@20`
+- `recall@50`
+- `recall@100`
+- `n_holdout_pos_in_remote_space`
+- `remote_evaluable`
+
+## Candidate Ranking Robustness Analysis / 候选排序稳健性分析
+
+The repository now ships a reusable CLI tool:  
+仓库现在包含一个可复用的正式 CLI 工具：
+
+```bash
+python scripts/stability_remote_candidates.py --run-dir runs/<timestamp>
+```
+
+It perturbs remote ranking weights around the tuned baseline and summarizes how stable each target-family candidate remains across repeated reranking.  
+它会围绕当前 tuned remote baseline 权重做扰动，并汇总目标 family 候选在重复 rerank 中的稳定性。
+
+### Default mcoA-like example / 默认 mcoA-like 示例
+
+```bash
+python scripts/stability_remote_candidates.py \
+  --run-dir runs/<timestamp> \
+  --target-family mcoA
+```
+
+### Other family example / 指定其他 family 示例
+
+```bash
+python scripts/stability_remote_candidates.py \
+  --run-dir runs/<timestamp> \
+  --target-family cotA_like \
+  --n-iter 300 \
+  --topk-list 10,20,50,100
+```
+
+### Custom weight example / 自定义权重示例
+
+```bash
+python scripts/stability_remote_candidates.py \
+  --run-dir runs/<timestamp> \
+  --target-family mcoA \
+  --base-weights-json '{"w_affinity": 0.45, "w_positive_support": 0.25, "w_local_density": 0.10, "w_novelty": 0.15, "w_false_positive_risk": -0.15, "w_identity_penalty": -0.05, "w_hmm_support": 0.10}'
+```
+
+Important output columns / 关键输出列：
+
+- `top10_freq`, `top20_freq`, `top50_freq`: frequency of staying inside top-K
+- `mean_rank`: average reranked position
+- `std_rank`: ranking stability / volatility
+- `best_rank`, `worst_rank`: optimistic and pessimistic bounds
+
+Recommended interpretation for first-round experimental selection.  
+面向首批实验候选的推荐解释方式：
+
+- High `top10_freq` or `top20_freq` suggests a candidate is not driven by one fragile weight setting.
+- Lower `mean_rank` and lower `std_rank` indicate stronger ranking robustness.
+- Candidates with decent baseline rank but very unstable perturbation behavior should be treated more cautiously.
+
+## Interpretation notes / 结果解读建议
+
+- A top-ranked candidate is **not** the same as definitive functional proof.  
+  排名前列候选 **不等于** 功能已被证明。
+- Do not mix `remote_only` CV with merged leaderboard interpretation.  
+  不要把 `remote_only` CV 与 merged 总榜混在一起解释。
+- Stability analysis is a prioritization tool for experiment planning, not functional evidence by itself.  
+  稳健性分析是实验优先级工具，不是功能证明本身。
 
 ## 本次升级（方法学对齐 + hybrid 优化）
 
